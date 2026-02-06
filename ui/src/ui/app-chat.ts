@@ -161,6 +161,7 @@ export async function handleSendChat(
   }
 
   const refreshSessions = isChatResetCommand(message);
+
   if (messageOverride == null) {
     host.chatMessage = "";
     // Clear attachments when sending
@@ -172,7 +173,7 @@ export async function handleSendChat(
     return;
   }
 
-  await sendChatMessageNow(host, message, {
+  return await sendChatMessageNow(host, message, {
     previousDraft: messageOverride == null ? previousDraft : undefined,
     restoreDraft: Boolean(messageOverride && opts?.restoreDraft),
     attachments: hasAttachments ? attachmentsToSend : undefined,

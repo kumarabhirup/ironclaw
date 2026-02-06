@@ -23,6 +23,7 @@ import {
 import { logVerbose } from "../../globals.js";
 import { clearCommandLane, getQueueSize } from "../../process/command-queue.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
+import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import { hasControlCommand } from "../command-detection.js";
 import { buildInboundMediaNote } from "../media-note.js";
@@ -294,15 +295,20 @@ export async function runPreparedReply(
         modelLabel === defaultLabel
           ? `✅ New session started · model: ${modelLabel}`
           : `✅ New session started · model: ${modelLabel} (default: ${defaultLabel})`;
-      await routeReply({
-        payload: { text },
-        channel,
-        to,
-        sessionKey,
-        accountId: ctx.AccountId,
-        threadId: ctx.MessageThreadId,
-        cfg,
-      });
+      // Webchat isn't supported by routeReply; use onBlockReply callback instead.
+      if (channel === INTERNAL_MESSAGE_CHANNEL && opts?.onBlockReply) {
+        await opts.onBlockReply({ text });
+      } else {
+        await routeReply({
+          payload: { text },
+          channel,
+          to,
+          sessionKey,
+          accountId: ctx.AccountId,
+          threadId: ctx.MessageThreadId,
+          cfg,
+        });
+      }
     }
   }
   const sessionIdFinal = sessionId ?? crypto.randomUUID();

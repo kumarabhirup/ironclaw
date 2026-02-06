@@ -144,6 +144,73 @@ function appendAssistantTranscriptMessage(params: {
   return { ok: true, messageId, message: transcriptEntry.message };
 }
 
+function appendUserTranscriptMessage(params: {
+  message: string;
+  images: ChatImageContent[];
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile?: string;
+  createIfMissing?: boolean;
+}): TranscriptAppendResult {
+  const transcriptPath = resolveTranscriptPath({
+    sessionId: params.sessionId,
+    storePath: params.storePath,
+    sessionFile: params.sessionFile,
+  });
+  if (!transcriptPath) {
+    return { ok: false, error: "transcript path not resolved" };
+  }
+
+  if (!fs.existsSync(transcriptPath)) {
+    if (!params.createIfMissing) {
+      return { ok: false, error: "transcript file not found" };
+    }
+    const ensured = ensureTranscriptFile({
+      transcriptPath,
+      sessionId: params.sessionId,
+    });
+    if (!ensured.ok) {
+      return { ok: false, error: ensured.error ?? "failed to create transcript file" };
+    }
+  }
+
+  const now = Date.now();
+  const messageId = randomUUID().slice(0, 8);
+  const content: Array<Record<string, unknown>> = [];
+  if (params.message.trim()) {
+    content.push({ type: "text", text: params.message });
+  }
+  for (const image of params.images) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: image.mimeType,
+        data: image.data,
+      },
+    });
+  }
+  const messageBody: Record<string, unknown> = {
+    role: "user",
+    content: content.length > 0 ? content : [],
+    timestamp: now,
+  };
+  const transcriptEntry = {
+    type: "message",
+    id: messageId,
+    timestamp: new Date(now).toISOString(),
+    message: messageBody,
+  };
+
+  try {
+    fs.appendFileSync(transcriptPath, `${JSON.stringify(transcriptEntry)}\n`, "utf-8");
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  return { ok: true, messageId, message: transcriptEntry.message };
+}
+
 function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: string) {
   const next = (context.agentRunSeq.get(runId) ?? 0) + 1;
   context.agentRunSeq.set(runId, next);
@@ -487,7 +554,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           context.logGateway.warn(`webchat dispatch failed: ${formatForLog(err)}`);
         },
         deliver: async (payload, info) => {
-          if (info.kind !== "final") {
+          if (info.kind !== "final" && info.kind !== "block") {
             return;
           }
           const text = payload.text?.trim() ?? "";
@@ -498,7 +565,28 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       });
 
+      const shouldPersistUser = parsedMessage.trim().startsWith("/");
       let agentRunStarted = false;
+      let userAppended = false;
+      const appendUserMessage = () => {
+        if (!shouldPersistUser || userAppended) return;
+        userAppended = true;
+        const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+        const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+        const appendedUser = appendUserTranscriptMessage({
+          message: parsedMessage,
+          images: parsedImages,
+          sessionId,
+          storePath: latestStorePath,
+          sessionFile: latestEntry?.sessionFile,
+          createIfMissing: true,
+        });
+        if (!appendedUser.ok) {
+          context.logGateway.warn(
+            `webchat transcript user append failed: ${appendedUser.error ?? "unknown error"}`,
+          );
+        }
+      };
       void dispatchInboundMessage({
         ctx,
         cfg,
@@ -510,6 +598,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           disableBlockStreaming: true,
           onAgentRunStart: () => {
             agentRunStarted = true;
+            appendUserMessage();
           },
           onModelSelected: (ctx) => {
             prefixContext.provider = ctx.provider;
@@ -527,11 +616,27 @@ export const chatHandlers: GatewayRequestHandlers = {
               .join("\n\n")
               .trim();
             let message: Record<string, unknown> | undefined;
+            const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(
+              p.sessionKey,
+            );
+            const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            if (!userAppended) {
+              const appendedUser = appendUserTranscriptMessage({
+                message: parsedMessage,
+                images: parsedImages,
+                sessionId,
+                storePath: latestStorePath,
+                sessionFile: latestEntry?.sessionFile,
+                createIfMissing: true,
+              });
+              userAppended = true;
+              if (!appendedUser.ok) {
+                context.logGateway.warn(
+                  `webchat transcript user append failed: ${appendedUser.error ?? "unknown error"}`,
+                );
+              }
+            }
             if (combinedReply) {
-              const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(
-                p.sessionKey,
-              );
-              const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
               const appended = appendAssistantTranscriptMessage({
                 message: combinedReply,
                 sessionId,
