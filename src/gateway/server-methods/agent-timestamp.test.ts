@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatZonedTimestamp } from "../../auto-reply/envelope.js";
+import { formatZonedTimestamp } from "../../infra/format-time/format-datetime.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 
 describe("injectTimestamp", () => {
@@ -23,7 +23,7 @@ describe("injectTimestamp", () => {
 
   it("uses channel envelope format with DOW prefix", () => {
     const now = new Date();
-    const expected = formatZonedTimestamp(now, "America/New_York");
+    const expected = formatZonedTimestamp(now, { timeZone: "America/New_York" });
 
     const result = injectTimestamp("hello", { timezone: "America/New_York" });
 
@@ -128,12 +128,14 @@ describe("timestampOptsFromConfig", () => {
           userTimezone: "America/Chicago",
         },
       },
+      // oxlint-disable-next-line typescript/no-explicit-any
     } as any);
 
     expect(opts.timezone).toBe("America/Chicago");
   });
 
   it("falls back gracefully with empty config", () => {
+    // oxlint-disable-next-line typescript/no-explicit-any
     const opts = timestampOptsFromConfig({} as any);
 
     expect(opts.timezone).toBeDefined(); // resolveUserTimezone provides a default

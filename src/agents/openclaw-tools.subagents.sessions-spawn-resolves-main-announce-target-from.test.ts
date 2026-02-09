@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { sleep } from "../utils.ts";
 
 const callGatewayMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -82,12 +83,27 @@ describe("openclaw-tools: subagents", () => {
       if (request.method === "agent.wait") {
         const params = request.params as { runId?: string; timeoutMs?: number } | undefined;
         waitCalls.push(params ?? {});
-        return { runId: params?.runId ?? "run-1", status: "ok", startedAt: 1000, endedAt: 2000 };
+        return {
+          runId: params?.runId ?? "run-1",
+          status: "ok",
+          startedAt: 1000,
+          endedAt: 2000,
+        };
       }
       if (request.method === "sessions.patch") {
         const params = request.params as { key?: string; label?: string } | undefined;
         patchParams = { key: params?.key, label: params?.label };
         return { ok: true };
+      }
+      if (request.method === "chat.history") {
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "done" }],
+            },
+          ],
+        };
       }
       if (request.method === "sessions.delete") {
         return { ok: true };
@@ -126,9 +142,9 @@ describe("openclaw-tools: subagents", () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sleep(0);
+    await sleep(0);
+    await sleep(0);
 
     const childWait = waitCalls.find((call) => call.runId === childRunId);
     expect(childWait?.timeoutMs).toBe(1000);
@@ -147,7 +163,7 @@ describe("openclaw-tools: subagents", () => {
     // Second call: main agent trigger (not "Sub-agent announce step." anymore)
     const second = agentCalls[1]?.params as { sessionKey?: string; message?: string } | undefined;
     expect(second?.sessionKey).toBe("main");
-    expect(second?.message).toContain("background task");
+    expect(second?.message).toContain("subagent task");
 
     // No direct send to external channel (main agent handles delivery)
     const sendCalls = calls.filter((c) => c.method === "send");

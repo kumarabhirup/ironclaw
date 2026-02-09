@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { sleep } from "../utils.js";
 import {
   buildGroupDisplayName,
   deriveSessionKey,
@@ -173,6 +174,50 @@ describe("sessions", () => {
       to: "222",
       accountId: "primary",
     });
+  });
+
+  it("updateLastRoute clears threadId when explicit route omits threadId", async () => {
+    const mainSessionKey = "agent:main:main";
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(
+      storePath,
+      JSON.stringify(
+        {
+          [mainSessionKey]: {
+            sessionId: "sess-1",
+            updatedAt: 123,
+            deliveryContext: {
+              channel: "telegram",
+              to: "222",
+              threadId: "42",
+            },
+            lastChannel: "telegram",
+            lastTo: "222",
+            lastThreadId: "42",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    await updateLastRoute({
+      storePath,
+      sessionKey: mainSessionKey,
+      deliveryContext: {
+        channel: "telegram",
+        to: "222",
+      },
+    });
+
+    const store = loadSessionStore(storePath);
+    expect(store[mainSessionKey]?.deliveryContext).toEqual({
+      channel: "telegram",
+      to: "222",
+    });
+    expect(store[mainSessionKey]?.lastThreadId).toBeUndefined();
   });
 
   it("updateLastRoute records origin + group metadata when ctx is provided", async () => {
@@ -428,7 +473,6 @@ describe("sessions", () => {
       "utf-8",
     );
 
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await Promise.all([
       updateSessionStoreEntry({
         storePath,

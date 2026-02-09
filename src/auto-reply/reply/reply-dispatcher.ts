@@ -2,6 +2,7 @@ import type { HumanDelayConfig } from "../../config/types.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { ResponsePrefixContext } from "./response-prefix-template.js";
 import type { TypingController } from "./typing.js";
+import { sleep } from "../../utils.js";
 import { normalizeReplyPayload, type NormalizeReplySkipReason } from "./normalize-reply.js";
 
 export type ReplyDispatchKind = "tool" | "block" | "final";
@@ -37,9 +38,6 @@ function getHumanDelay(config: HumanDelayConfig | undefined): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-/** Sleep for a given number of milliseconds. */
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 export type ReplyDispatcherOptions = {
   deliver: ReplyDispatchDeliverer;
   responsePrefix?: string;
@@ -60,11 +58,13 @@ export type ReplyDispatcherOptions = {
 export type ReplyDispatcherWithTypingOptions = Omit<ReplyDispatcherOptions, "onIdle"> & {
   onReplyStart?: () => Promise<void> | void;
   onIdle?: () => void;
+  /** Called when the typing controller is cleaned up (e.g., on NO_REPLY). */
+  onCleanup?: () => void;
 };
 
 type ReplyDispatcherWithTypingResult = {
   dispatcher: ReplyDispatcher;
-  replyOptions: Pick<GetReplyOptions, "onReplyStart" | "onTypingController">;
+  replyOptions: Pick<GetReplyOptions, "onReplyStart" | "onTypingController" | "onTypingCleanup">;
   markDispatchIdle: () => void;
 };
 
@@ -166,7 +166,7 @@ export function createReplyDispatcher(options: ReplyDispatcherOptions): ReplyDis
 export function createReplyDispatcherWithTyping(
   options: ReplyDispatcherWithTypingOptions,
 ): ReplyDispatcherWithTypingResult {
-  const { onReplyStart, onIdle, ...dispatcherOptions } = options;
+  const { onReplyStart, onIdle, onCleanup, ...dispatcherOptions } = options;
   let typingController: TypingController | undefined;
   const dispatcher = createReplyDispatcher({
     ...dispatcherOptions,
@@ -180,6 +180,7 @@ export function createReplyDispatcherWithTyping(
     dispatcher,
     replyOptions: {
       onReplyStart,
+      onTypingCleanup: onCleanup,
       onTypingController: (typing) => {
         typingController = typing;
       },

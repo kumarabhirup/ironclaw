@@ -1,4 +1,3 @@
-import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
@@ -8,7 +7,7 @@ import {
   parseAgentSessionKey,
 } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "./workspace.js";
+import { resolveDefaultAgentWorkspaceDir } from "./workspace.js";
 
 export { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 
@@ -19,6 +18,7 @@ type ResolvedAgentConfig = {
   workspace?: string;
   agentDir?: string;
   model?: AgentEntry["model"];
+  skills?: AgentEntry["skills"];
   memorySearch?: AgentEntry["memorySearch"];
   humanDelay?: AgentEntry["humanDelay"];
   heartbeat?: AgentEntry["heartbeat"];
@@ -112,6 +112,7 @@ export function resolveAgentConfig(
       typeof entry.model === "string" || (entry.model && typeof entry.model === "object")
         ? entry.model
         : undefined,
+    skills: Array.isArray(entry.skills) ? entry.skills : undefined,
     memorySearch: entry.memorySearch,
     humanDelay: entry.humanDelay,
     heartbeat: entry.heartbeat,
@@ -121,6 +122,18 @@ export function resolveAgentConfig(
     sandbox: entry.sandbox,
     tools: entry.tools,
   };
+}
+
+export function resolveAgentSkillsFilter(
+  cfg: OpenClawConfig,
+  agentId: string,
+): string[] | undefined {
+  const raw = resolveAgentConfig(cfg, agentId)?.skills;
+  if (!raw) {
+    return undefined;
+  }
+  const normalized = raw.map((entry) => String(entry).trim()).filter(Boolean);
+  return normalized.length > 0 ? normalized : [];
 }
 
 export function resolveAgentModelPrimary(cfg: OpenClawConfig, agentId: string): string | undefined {
@@ -162,9 +175,10 @@ export function resolveAgentWorkspaceDir(cfg: OpenClawConfig, agentId: string) {
     if (fallback) {
       return resolveUserPath(fallback);
     }
-    return DEFAULT_AGENT_WORKSPACE_DIR;
+    return resolveDefaultAgentWorkspaceDir(process.env);
   }
-  return path.join(os.homedir(), ".openclaw", `workspace-${id}`);
+  const stateDir = resolveStateDir(process.env);
+  return path.join(stateDir, `workspace-${id}`);
 }
 
 export function resolveAgentDir(cfg: OpenClawConfig, agentId: string) {
@@ -173,6 +187,6 @@ export function resolveAgentDir(cfg: OpenClawConfig, agentId: string) {
   if (configured) {
     return resolveUserPath(configured);
   }
-  const root = resolveStateDir(process.env, os.homedir);
+  const root = resolveStateDir(process.env);
   return path.join(root, "agents", id, "agent");
 }

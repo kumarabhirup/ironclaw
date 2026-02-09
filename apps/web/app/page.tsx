@@ -19,6 +19,9 @@ export default function Home() {
 
   // Track which messages have already been persisted to avoid double-saves
   const savedMessageIdsRef = useRef<Set<string>>(new Set());
+  // Set when /new or + explicitly triggers a new session, so we can record
+  // the /new command as the first entry when the session is actually created.
+  const newSessionPendingRef = useRef(false);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -59,7 +62,7 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ messages: toSave, title }),
         });
-        for (const m of msgs) savedMessageIdsRef.current.add(m.id);
+        for (const m of msgs) {savedMessageIdsRef.current.add(m.id);}
         refreshSidebar();
       } catch (err) {
         console.error("Failed to save messages:", err);
@@ -92,7 +95,10 @@ export default function Home() {
     [],
   );
 
-  // When streaming finishes, save the assistant's response
+  // When streaming finishes, persist all unsaved messages (user + assistant).
+  // This is the single save-point for chat messages — handleSubmit only saves
+  // the synthetic /new marker; actual user/assistant messages are saved here
+  // so their ids match what useChat tracks (avoids duplicate-id issues).
   const prevStatusRef = useRef(status);
   useEffect(() => {
     const wasStreaming =
@@ -100,9 +106,6 @@ export default function Home() {
     const isNowReady = status === "ready";
 
     if (wasStreaming && isNowReady && currentSessionId) {
-      // Save any unsaved messages (typically the assistant response).
-      // Include the full parts array so reasoning, tool calls, and their
-      // outputs persist across session reloads.
       const unsaved = messages.filter((m) => !savedMessageIdsRef.current.has(m.id));
       if (unsaved.length > 0) {
         const toSave = unsaved.map((m) => ({
@@ -119,7 +122,7 @@ export default function Home() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isStreaming) return;
+    if (!input.trim() || isStreaming) {return;}
 
     const userText = input.trim();
     setInput("");
@@ -137,18 +140,25 @@ export default function Home() {
       sessionId = await createSession(title);
       setCurrentSessionId(sessionId);
       refreshSidebar();
+
+      // If this session was triggered by /new or +, record it as the first entry
+      if (newSessionPendingRef.current) {
+        newSessionPendingRef.current = false;
+        const newMsgId = `system-new-${Date.now()}`;
+        await saveMessages(sessionId, [
+          {
+            id: newMsgId,
+            role: "user",
+            content: "/new",
+            parts: [{ type: "text", text: "/new" }],
+          },
+        ]);
+      }
     }
 
-    // Save the user message immediately (include parts for consistency)
-    const userMsgId = `user-${Date.now()}`;
-    await saveMessages(sessionId, [
-      {
-        id: userMsgId,
-        role: "user",
-        content: userText,
-        parts: [{ type: "text", text: userText }],
-      },
-    ]);
+    // Don't save the user message eagerly here — the useEffect that fires
+    // when streaming finishes saves all unsaved messages (user + assistant)
+    // using useChat's own ids, which avoids duplicate entries.
 
     // Send to agent
     sendMessage({ text: userText });
@@ -157,7 +167,7 @@ export default function Home() {
   /** Load a previous web chat session */
   const handleSessionSelect = useCallback(
     async (sessionId: string) => {
-      if (sessionId === currentSessionId) return;
+      if (sessionId === currentSessionId) {return;}
 
       setLoadingSession(true);
       setCurrentSessionId(sessionId);
@@ -165,7 +175,7 @@ export default function Home() {
 
       try {
         const response = await fetch(`/api/web-sessions/${sessionId}`);
-        if (!response.ok) throw new Error("Failed to load session");
+        if (!response.ok) {throw new Error("Failed to load session");}
 
         const data = await response.json();
         const sessionMessages: Array<{
@@ -203,6 +213,8 @@ export default function Home() {
     setCurrentSessionId(null);
     setMessages([]);
     savedMessageIdsRef.current.clear();
+    // Mark that the next session should start with a /new entry
+    newSessionPendingRef.current = true;
 
     // Send /new to the agent backend to start a fresh session
     setStartingNewSession(true);
