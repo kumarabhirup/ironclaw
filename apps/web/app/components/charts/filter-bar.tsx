@@ -147,7 +147,7 @@ function MultiSelectFilter({
               onClick={() => toggleOption(opt)}
               className="px-2 py-0.5 rounded-full text-[10px] transition-colors cursor-pointer"
               style={{
-                background: selected ? "rgba(232, 93, 58, 0.15)" : "var(--color-surface)",
+                background: selected ? "var(--color-accent-light)" : "var(--color-surface)",
                 border: `1px solid ${selected ? "var(--color-accent)" : "var(--color-border)"}`,
                 color: selected ? "var(--color-accent)" : "var(--color-text-muted)",
               }}
@@ -333,7 +333,7 @@ export function FilterBar({ filters, value, onChange }: FilterBarProps) {
           className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] transition-colors cursor-pointer"
           style={{
             color: "var(--color-accent)",
-            background: "rgba(232, 93, 58, 0.1)",
+            background: "var(--color-accent-light)",
           }}
         >
           <XIcon />

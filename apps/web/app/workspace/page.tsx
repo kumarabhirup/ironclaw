@@ -9,6 +9,7 @@ import { ObjectTable } from "../components/workspace/object-table";
 import { ObjectKanban } from "../components/workspace/object-kanban";
 import { DocumentView } from "../components/workspace/document-view";
 import { FileViewer } from "../components/workspace/file-viewer";
+import { MediaViewer, detectMediaType, type MediaType } from "../components/workspace/media-viewer";
 import { DatabaseViewer } from "../components/workspace/database-viewer";
 import { Breadcrumbs } from "../components/workspace/breadcrumbs";
 import { EmptyState } from "../components/workspace/empty-state";
@@ -78,6 +79,7 @@ type ContentState =
   | { kind: "object"; data: ObjectData }
   | { kind: "document"; data: FileData; title: string }
   | { kind: "file"; data: FileData; filename: string }
+  | { kind: "media"; url: string; mediaType: MediaType; filename: string; filePath: string }
   | { kind: "database"; dbPath: string; filename: string }
   | { kind: "report"; reportPath: string; filename: string }
   | { kind: "directory"; node: TreeNode };
@@ -301,6 +303,14 @@ function WorkspacePageInner() {
         } else if (node.type === "report") {
           setContent({ kind: "report", reportPath: node.path, filename: node.name });
         } else if (node.type === "file") {
+          // Check if this is a media file (image/video/audio/pdf)
+          const mediaType = detectMediaType(node.name);
+          if (mediaType) {
+            const rawUrl = `/api/workspace/raw-file?path=${encodeURIComponent(node.path)}`;
+            setContent({ kind: "media", url: rawUrl, mediaType, filename: node.name, filePath: node.path });
+            return;
+          }
+
           const res = await fetch(fileApiUrl(node.path));
           if (!res.ok) {
             setContent({ kind: "none" });
@@ -556,7 +566,7 @@ function WorkspacePageInner() {
                   setContent({ kind: "none" });
                   router.replace("/workspace", { scroll: false });
                 }}
-                className="p-1.5 rounded-md transition-colors flex-shrink-0"
+                className="p-1.5 rounded-lg flex-shrink-0"
                 style={{ color: "var(--color-text-muted)" }}
                 title="Back to chat"
               >
@@ -568,10 +578,10 @@ function WorkspacePageInner() {
               <button
                 type="button"
                 onClick={() => setShowChatSidebar((v) => !v)}
-                className="p-1.5 rounded-md transition-colors flex-shrink-0"
+                className="p-1.5 rounded-lg flex-shrink-0"
                 style={{
                   color: showChatSidebar ? "var(--color-accent)" : "var(--color-text-muted)",
-                  background: showChatSidebar ? "rgba(232, 93, 58, 0.1)" : "transparent",
+                  background: showChatSidebar ? "var(--color-accent-light)" : "transparent",
                 }}
                 title={showChatSidebar ? "Hide chat" : "Chat about this file"}
               >
@@ -650,6 +660,7 @@ function WorkspacePageInner() {
             handleCloseEntry();
             handleNavigateToObject(objName);
           }}
+          onRefresh={refreshCurrentObject}
         />
       )}
     </div>
@@ -729,6 +740,16 @@ function ContentRenderer({
           content={content.data.content}
           filename={content.filename}
           type={content.data.type === "yaml" ? "yaml" : "text"}
+        />
+      );
+
+    case "media":
+      return (
+        <MediaViewer
+          url={content.url}
+          filename={content.filename}
+          mediaType={content.mediaType}
+          filePath={content.filePath}
         />
       );
 
@@ -817,7 +838,7 @@ function ObjectView({
       {/* Object header */}
       <div className="mb-6">
         <h1
-          className="text-2xl font-bold capitalize"
+          className="font-instrument text-3xl tracking-tight capitalize"
           style={{ color: "var(--color-text)" }}
         >
           {data.object.name}
@@ -856,9 +877,9 @@ function ObjectView({
             <span
               className="text-xs px-2 py-1 rounded-full"
               style={{
-                background: "rgba(96, 165, 250, 0.08)",
-                color: "#60a5fa",
-                border: "1px solid rgba(96, 165, 250, 0.2)",
+                background: "var(--color-chip-document)",
+                color: "var(--color-chip-document-text)",
+                border: "1px solid var(--color-border)",
               }}
             >
               {data.fields.filter((f) => f.type === "relation").length} relation{data.fields.filter((f) => f.type === "relation").length !== 1 ? "s" : ""}
@@ -868,9 +889,9 @@ function ObjectView({
             <span
               className="text-xs px-2 py-1 rounded-full"
               style={{
-                background: "rgba(192, 132, 252, 0.08)",
-                color: "#c084fc",
-                border: "1px solid rgba(192, 132, 252, 0.2)",
+                background: "var(--color-chip-database)",
+                color: "var(--color-chip-database-text)",
+                border: "1px solid var(--color-border)",
               }}
             >
               {data.reverseRelations!.filter((rr) => Object.keys(rr.entries).length > 0).length} linked from
@@ -940,6 +961,7 @@ function ObjectView({
           reverseRelations={data.reverseRelations}
           onNavigateToObject={onNavigateToObject}
           onEntryClick={onOpenEntry ? (entryId) => onOpenEntry(data.object.name, entryId) : undefined}
+          onRefresh={onRefreshObject}
         />
       )}
     </div>
@@ -960,7 +982,7 @@ function DirectoryListing({
   return (
     <div className="p-6 max-w-4xl mx-auto">
       <h1
-        className="text-2xl font-bold mb-1 capitalize"
+        className="font-instrument text-3xl tracking-tight mb-1 capitalize"
         style={{ color: "var(--color-text)" }}
       >
         {node.name}
@@ -980,14 +1002,15 @@ function DirectoryListing({
               type="button"
               key={child.path}
               onClick={() => onNodeSelect(child)}
-              className="flex items-center gap-3 p-4 rounded-xl text-left transition-all duration-100 cursor-pointer"
+              className="flex items-center gap-3 p-4 rounded-2xl text-left transition-all duration-100 cursor-pointer"
               style={{
                 background: "var(--color-surface)",
                 border: "1px solid var(--color-border)",
+                boxShadow: "var(--shadow-sm)",
               }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLElement).style.borderColor =
-                  "var(--color-text-muted)";
+                  "var(--color-border-strong)";
                 (e.currentTarget as HTMLElement).style.transform = "translateY(-1px)";
               }}
               onMouseLeave={(e) => {
@@ -997,27 +1020,27 @@ function DirectoryListing({
               }}
             >
               <span
-                className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
                 style={{
                   background:
                     child.type === "object"
-                      ? "rgba(232, 93, 58, 0.1)"
+                      ? "var(--color-chip-object)"
                       : child.type === "document"
-                        ? "rgba(96, 165, 250, 0.1)"
+                        ? "var(--color-chip-document)"
                         : child.type === "database"
-                          ? "rgba(192, 132, 252, 0.1)"
+                          ? "var(--color-chip-database)"
                           : child.type === "report"
-                            ? "rgba(34, 197, 94, 0.1)"
+                            ? "var(--color-chip-report)"
                             : "var(--color-surface-hover)",
                   color:
                     child.type === "object"
-                      ? "var(--color-accent)"
+                      ? "var(--color-chip-object-text)"
                       : child.type === "document"
-                        ? "#60a5fa"
+                        ? "var(--color-chip-document-text)"
                         : child.type === "database"
-                          ? "#c084fc"
+                          ? "var(--color-chip-database-text)"
                           : child.type === "report"
-                            ? "#22c55e"
+                            ? "var(--color-chip-report-text)"
                             : "var(--color-text-muted)",
                 }}
               >
@@ -1030,7 +1053,10 @@ function DirectoryListing({
                 >
                   {child.name.replace(/\.md$/, "")}
                 </div>
-                <div className="text-xs capitalize" style={{ color: "var(--color-text-muted)" }}>
+                <div
+                  className="text-xs capitalize"
+                  style={{ color: "var(--color-text-muted)" }}
+                >
                   {child.type}
                   {child.children ? ` (${child.children.length})` : ""}
                 </div>
@@ -1067,7 +1093,7 @@ function WelcomeView({
   return (
     <div className="p-8 max-w-4xl mx-auto">
       <h1
-        className="text-2xl font-bold mb-2"
+        className="font-instrument text-3xl tracking-tight mb-2"
         style={{ color: "var(--color-text)" }}
       >
         Workspace
@@ -1090,10 +1116,11 @@ function WelcomeView({
                 type="button"
                 key={obj.path}
                 onClick={() => onNodeSelect(obj)}
-                className="flex items-center gap-3 p-4 rounded-xl text-left transition-all duration-100 cursor-pointer"
+                className="flex items-center gap-3 p-4 rounded-2xl text-left transition-all duration-100 cursor-pointer"
                 style={{
                   background: "var(--color-surface)",
                   border: "1px solid var(--color-border)",
+                  boxShadow: "var(--shadow-sm)",
                 }}
                 onMouseEnter={(e) => {
                   (e.currentTarget as HTMLElement).style.borderColor =
@@ -1105,10 +1132,10 @@ function WelcomeView({
                 }}
               >
                 <span
-                  className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
                   style={{
-                    background: "rgba(232, 93, 58, 0.1)",
-                    color: "var(--color-accent)",
+                    background: "var(--color-chip-object)",
+                    color: "var(--color-chip-object-text)",
                   }}
                 >
                   <NodeTypeIcon type="object" />
@@ -1144,13 +1171,14 @@ function WelcomeView({
                 type="button"
                 key={doc.path}
                 onClick={() => onNodeSelect(doc)}
-                className="flex items-center gap-3 p-4 rounded-xl text-left transition-all duration-100 cursor-pointer"
+                className="flex items-center gap-3 p-4 rounded-2xl text-left transition-all duration-100 cursor-pointer"
                 style={{
                   background: "var(--color-surface)",
                   border: "1px solid var(--color-border)",
+                  boxShadow: "var(--shadow-sm)",
                 }}
                 onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.borderColor = "#60a5fa";
+                  (e.currentTarget as HTMLElement).style.borderColor = "var(--color-chip-document-text)";
                 }}
                 onMouseLeave={(e) => {
                   (e.currentTarget as HTMLElement).style.borderColor =
@@ -1158,10 +1186,10 @@ function WelcomeView({
                 }}
               >
                 <span
-                  className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
                   style={{
-                    background: "rgba(96, 165, 250, 0.1)",
-                    color: "#60a5fa",
+                    background: "var(--color-chip-document)",
+                    color: "var(--color-chip-document-text)",
                   }}
                 >
                   <NodeTypeIcon type="document" />

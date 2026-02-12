@@ -253,44 +253,8 @@ export async function GET() {
       for (const o of objs) {dbObjects.set(o.name, o);}
     }
 
-    const knowledgeDir = join(root, "knowledge");
-    if (existsSync(knowledgeDir)) {
-      flattenTree(knowledgeDir, "knowledge", dbObjects, items);
-    }
-
-    const reportsDir = join(root, "reports");
-    if (existsSync(reportsDir)) {
-      flattenTree(reportsDir, "reports", dbObjects, items);
-    }
-
-    // Top-level files
-    try {
-      const topLevel = readdirSync(root, { withFileTypes: true });
-      for (const entry of topLevel) {
-        if (!entry.isFile() || entry.name.startsWith(".")) {continue;}
-        const ext = entry.name.split(".").pop()?.toLowerCase();
-        const isDoc = ext === "md" || ext === "mdx";
-        const isDb = isDatabaseFile(entry.name);
-        const isReport = entry.name.endsWith(".report.json");
-
-        items.push({
-          id: entry.name,
-          label: entry.name.replace(/\.md$/, ""),
-          sublabel: entry.name,
-          kind: "file",
-          path: entry.name,
-          nodeType: isReport
-            ? "report"
-            : isDb
-              ? "database"
-              : isDoc
-                ? "document"
-                : "file",
-        });
-      }
-    } catch {
-      // skip
-    }
+    // Scan entire dench root (the dench folder IS the knowledge base)
+    flattenTree(root, "", dbObjects, items);
   }
 
   // 2. Entries from all objects

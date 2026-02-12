@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /* ─── Public types ─── */
 
@@ -14,7 +14,394 @@ export type ChainPart =
 			args?: Record<string, unknown>;
 			output?: Record<string, unknown>;
 			errorText?: string;
+		}
+	| {
+			kind: "status";
+			label: string;
+			isActive: boolean;
 		};
+
+/* ─── Media / file type helpers ─── */
+
+const IMAGE_EXTS = new Set([
+	"jpg",
+	"jpeg",
+	"png",
+	"gif",
+	"webp",
+	"svg",
+	"bmp",
+	"avif",
+	"heic",
+	"heif",
+	"tiff",
+	"tif",
+	"ico",
+]);
+const VIDEO_EXTS = new Set([
+	"mp4",
+	"webm",
+	"mov",
+	"avi",
+	"mkv",
+]);
+const PDF_EXTS = new Set(["pdf"]);
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "m4a"]);
+
+type MediaKind = "image" | "video" | "pdf" | "audio" | null;
+
+function getFileExt(path: string): string {
+	return (path.split(".").pop() ?? "").toLowerCase();
+}
+
+function detectMedia(path: string): MediaKind {
+	const ext = getFileExt(path);
+	if (IMAGE_EXTS.has(ext)) {return "image";}
+	if (VIDEO_EXTS.has(ext)) {return "video";}
+	if (PDF_EXTS.has(ext)) {return "pdf";}
+	if (AUDIO_EXTS.has(ext)) {return "audio";}
+	return null;
+}
+
+function rawFileUrl(path: string): string {
+	return `/api/workspace/raw-file?path=${encodeURIComponent(path)}`;
+}
+
+/** Resolve a media URL — use raw URL directly if it's already HTTP */
+function resolveMediaUrl(path: string): string {
+	if (path.startsWith("http://") || path.startsWith("https://")) {
+		return path;
+	}
+	return rawFileUrl(path);
+}
+
+/** Regex to find file paths with media extensions in free text */
+const MEDIA_FILE_RE =
+	/(?:^|[\s"'(=])(((?:\/|\.\/)?[\w.\-/\\]+)\.(?:jpe?g|png|gif|webp|svg|bmp|avif|heic|heif|tiff?|ico|mp4|webm|mov|avi|mkv|mp3|wav|ogg|m4a|pdf))\b/i;
+
+const PATH_KEYS = [
+	"path",
+	"file",
+	"file_path",
+	"filePath",
+	"filename",
+	"url",
+	"src",
+	"name",
+	"target",
+];
+
+/**
+ * Extract the file path from tool args and/or output.
+ * Searches standard keys, then all string values, then output text.
+ */
+function getFilePath(
+	args?: Record<string, unknown>,
+	output?: Record<string, unknown>,
+): string | null {
+	// 1. Check standard keys in args
+	if (args) {
+		for (const key of PATH_KEYS) {
+			const v = args[key];
+			if (typeof v === "string" && v.length > 0) {return v;}
+		}
+	}
+
+	// 2. Check standard keys in output
+	if (output) {
+		for (const key of PATH_KEYS) {
+			const v = output[key];
+			if (typeof v === "string" && v.length > 0 && looksLikePath(v))
+				{return v;}
+		}
+	}
+
+	// 3. Scan all string values in args for file-like paths
+	if (args) {
+		const found = findPathInValues(args);
+		if (found) {return found;}
+	}
+
+	// 4. Extract from output text
+	if (output?.text && typeof output.text === "string") {
+		const m = output.text.match(MEDIA_FILE_RE);
+		if (m) {return m[1];}
+	}
+
+	// 5. Scan output values too
+	if (output) {
+		const found = findPathInValues(output);
+		if (found) {return found;}
+	}
+
+	return null;
+}
+
+/** Check if a string looks like a file path (has an extension, no spaces) */
+function looksLikePath(s: string): boolean {
+	return (
+		s.length > 2 &&
+		s.length < 500 &&
+		/\.\w{1,5}$/.test(s) &&
+		!s.includes(" ")
+	);
+}
+
+/** Search all string values in an object for a path-like string */
+function findPathInValues(obj: Record<string, unknown>): string | null {
+	for (const val of Object.values(obj)) {
+		if (typeof val === "string" && looksLikePath(val)) {
+			return val;
+		}
+	}
+	return null;
+}
+
+/* ─── Domain / URL extraction helpers ─── */
+
+const URL_RE = /https?:\/\/[^\s"'<>,;)}\]]+/gi;
+
+function extractDomains(text: string): string[] {
+	const urls = text.match(URL_RE) ?? [];
+	const domains = new Set<string>();
+	for (const url of urls) {
+		try {
+			const hostname = new URL(url).hostname;
+			if (hostname && !hostname.includes("localhost")) {
+				domains.add(hostname);
+			}
+		} catch {
+			/* skip */
+		}
+	}
+	return [...domains].slice(0, 8);
+}
+
+function faviconUrl(domain: string): string {
+	return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`;
+}
+
+/* ─── Classify tool steps ─── */
+
+type StepKind =
+	| "search"
+	| "fetch"
+	| "read"
+	| "exec"
+	| "write"
+	| "image"
+	| "generic";
+
+function classifyTool(name: string): StepKind {
+	const n = name.toLowerCase().replace(/[_-]/g, "");
+	if (
+		[
+			"websearch",
+			"search",
+			"googlesearch",
+			"bingsearch",
+			"browsersearch",
+			"tavily",
+		].some((k) => n.includes(k))
+	)
+		{return "search";}
+	if (
+		["fetchurl", "fetch", "browse", "browseurl", "webfetch"].some(
+			(k) => n.includes(k),
+		)
+	)
+		{return "fetch";}
+	if (
+		["read", "file", "readfile", "getfile"].some(
+			(k) => n.includes(k),
+		)
+	)
+		{return "read";}
+	if (
+		[
+			"bash",
+			"shell",
+			"execute",
+			"exec",
+			"terminal",
+			"command",
+			"run",
+		].some((k) => n.includes(k))
+	)
+		{return "exec";}
+	if (
+		[
+			"write",
+			"create",
+			"edit",
+			"str_replace",
+			"save",
+			"patch",
+		].some((k) => n.includes(k))
+	)
+		{return "write";}
+	if (
+		[
+			"image",
+			"screenshot",
+			"photo",
+			"picture",
+			"dalle",
+			"generateimage",
+		].some((k) => n.includes(k))
+	)
+		{return "image";}
+	return "generic";
+}
+
+function buildStepLabel(
+	kind: StepKind,
+	toolName: string,
+	args?: Record<string, unknown>,
+	output?: Record<string, unknown>,
+): string {
+	const strVal = (key: string) => {
+		const v = args?.[key];
+		return typeof v === "string" && v.length > 0 ? v : null;
+	};
+
+	switch (kind) {
+		case "search": {
+			const q =
+				strVal("query") ??
+				strVal("search_query") ??
+				strVal("search") ??
+				strVal("q");
+			return q
+				? `Searching for ${q.length > 60 ? q.slice(0, 60) + "..." : q}`
+				: "Searching...";
+		}
+		case "fetch": {
+			const u =
+				strVal("url") ?? strVal("path") ?? strVal("src");
+			if (u) {
+				try {
+					return `Fetching ${new URL(u).hostname}`;
+				} catch {
+					return `Fetching ${u.length > 50 ? u.slice(0, 50) + "..." : u}`;
+				}
+			}
+			return "Fetching page";
+		}
+		case "read": {
+			const p = getFilePath(args, output);
+			if (p) {
+				const short = p.split("/").pop() ?? p;
+				return short.startsWith("http")
+					? `Fetching ${short.slice(0, 50)}`
+					: `Reading ${short}`;
+			}
+			return "Reading file";
+		}
+		case "exec": {
+			const cmd = strVal("command") ?? strVal("cmd");
+			if (cmd) {
+				const short =
+					cmd.length > 60 ? cmd.slice(0, 60) + "..." : cmd;
+				return `Running: ${short}`;
+			}
+			return "Running command";
+		}
+		case "write": {
+			const p = strVal("path") ?? strVal("file") ?? strVal("file_path");
+			if (p) {
+				const short = p.split("/").pop() ?? p;
+				return `Editing ${short}`;
+			}
+			return "Editing file";
+		}
+		case "image":
+			return strVal("description")
+				? `Generating image: ${strVal("description")!.slice(0, 50)}`
+				: "Generating image";
+		default:
+			return toolName
+				.replace(/_/g, " ")
+				.replace(/\b\w/g, (c) => c.toUpperCase())
+				.trim();
+	}
+}
+
+/** Extract domains from tool output for search steps */
+function getSearchDomains(
+	output?: Record<string, unknown>,
+): string[] {
+	if (!output) {return [];}
+	const text = typeof output.text === "string" ? output.text : "";
+	const results = output.results;
+	let combined = text;
+	if (Array.isArray(results)) {
+		for (const r of results) {
+			if (typeof r === "object" && r !== null) {
+				const obj = r as Record<string, unknown>;
+				if (typeof obj.url === "string")
+					{combined += ` ${obj.url}`;}
+				if (typeof obj.link === "string")
+					{combined += ` ${obj.link}`;}
+			}
+		}
+	}
+	return extractDomains(combined);
+}
+
+/* ─── Group consecutive media reads ─── */
+
+type ToolPart = Extract<ChainPart, { kind: "tool" }>;
+
+type VisualItem =
+	| { type: "tool"; tool: ToolPart }
+	| {
+			type: "media-group";
+			mediaKind: "image" | "video" | "pdf" | "audio";
+			items: Array<{ path: string; tool: ToolPart }>;
+		};
+
+function groupToolSteps(tools: ToolPart[]): VisualItem[] {
+	const result: VisualItem[] = [];
+	let i = 0;
+	while (i < tools.length) {
+		const tool = tools[i];
+		const kind = classifyTool(tool.toolName);
+		// Check both args AND output for the file path
+		const filePath = getFilePath(tool.args, tool.output);
+		const media = filePath ? detectMedia(filePath) : null;
+
+		// If this is a media read, look for consecutive media reads of the same kind
+		if (kind === "read" && media && filePath) {
+			const group: Array<{ path: string; tool: ToolPart }> = [
+				{ path: filePath, tool },
+			];
+			let j = i + 1;
+			while (j < tools.length) {
+				const next = tools[j];
+				const nextKind = classifyTool(next.toolName);
+				const nextPath = getFilePath(next.args, next.output);
+				const nextMedia = nextPath ? detectMedia(nextPath) : null;
+				if (nextKind === "read" && nextMedia === media && nextPath) {
+					group.push({ path: nextPath, tool: next });
+					j++;
+				} else {
+					break;
+				}
+			}
+			result.push({
+				type: "media-group",
+				mediaKind: media,
+				items: group,
+			});
+			i = j;
+		} else {
+			result.push({ type: "tool", tool });
+			i++;
+		}
+	}
+	return result;
+}
 
 /* ─── Main component ─── */
 
@@ -25,10 +412,39 @@ export function ChainOfThought({ parts }: { parts: ChainPart[] }) {
 	const isActive = parts.some(
 		(p) =>
 			(p.kind === "reasoning" && p.isStreaming) ||
-			(p.kind === "tool" && p.status === "running"),
+			(p.kind === "tool" && p.status === "running") ||
+			(p.kind === "status" && p.isActive),
 	);
 
-	// Auto-collapse once all steps finish (active → inactive transition)
+	/* ─── Live elapsed-time tracking ─── */
+	const startRef = useRef<number | null>(null);
+	const [elapsed, setElapsed] = useState(0);
+
+	useEffect(() => {
+		if (isActive && startRef.current === null) {
+			startRef.current = Date.now();
+		}
+	}, [isActive]);
+
+	useEffect(() => {
+		if (!isActive) {return;}
+		const tick = () => {
+			if (startRef.current !== null) {
+				setElapsed(Math.floor((Date.now() - startRef.current) / 1000));
+			}
+		};
+		tick();
+		const id = setInterval(tick, 1000);
+		return () => clearInterval(id);
+	}, [isActive]);
+
+	const formatDuration = useCallback((s: number) => {
+		if (s < 60) {return `${s}s`;}
+		const m = Math.floor(s / 60);
+		const rem = s % 60;
+		return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+	}, []);
+
 	useEffect(() => {
 		if (prevActiveRef.current && !isActive && parts.length > 0) {
 			setIsOpen(false);
@@ -36,7 +452,10 @@ export function ChainOfThought({ parts }: { parts: ChainPart[] }) {
 		prevActiveRef.current = isActive;
 	}, [isActive, parts.length]);
 
-	// Aggregate reasoning text from all reasoning parts
+	const statusParts = parts.filter(
+		(p): p is Extract<ChainPart, { kind: "status" }> =>
+			p.kind === "status",
+	);
 	const reasoningText = parts
 		.filter(
 			(p): p is Extract<ChainPart, { kind: "reasoning" }> =>
@@ -48,78 +467,126 @@ export function ChainOfThought({ parts }: { parts: ChainPart[] }) {
 		(p) => p.kind === "reasoning" && p.isStreaming,
 	);
 
-	// Tool steps
 	const tools = parts.filter(
-		(p): p is Extract<ChainPart, { kind: "tool" }> => p.kind === "tool",
+		(p): p is ToolPart => p.kind === "tool",
 	);
-	const completedTools = tools.filter((t) => t.status === "done").length;
-	const activeTool = tools.find((t) => t.status === "running");
+	const visualItems = groupToolSteps(tools);
 
-	// Header label summarizes current/completed activity
-	let headerLabel: string;
-	if (isActive) {
-		if (activeTool) {
-			// Show what the active tool is doing
-			const summary = getToolSummary(
-				activeTool.toolName,
-				activeTool.args,
-			);
-			headerLabel = summary || formatToolName(activeTool.toolName);
-		} else {
-			headerLabel = "Thinking";
-		}
-	} else if (tools.length > 0) {
-		headerLabel = `Reasoned with ${completedTools} tool${completedTools !== 1 ? "s" : ""}`;
-	} else {
-		headerLabel = "Reasoned";
-	}
+	// Derive a more descriptive header from status parts
+	const activeStatus = statusParts.find((s) => s.isActive);
+	const headerLabel = isActive
+		? activeStatus
+			? elapsed > 0
+				? `${activeStatus.label} ${formatDuration(elapsed)}`
+				: activeStatus.label
+			: elapsed > 0
+				? `Thinking... ${formatDuration(elapsed)}`
+				: "Thinking..."
+		: elapsed > 0
+			? `Thought for ${formatDuration(elapsed)}`
+			: "Thought";
 
 	return (
-		<div className="my-2 rounded-lg border border-[var(--color-border)] overflow-hidden">
-			{/* Trigger */}
+		<div className="my-3">
+			{/* Header trigger */}
 			<button
 				type="button"
 				onClick={() => setIsOpen((v) => !v)}
-				className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
+				className="flex items-center gap-2 py-1 text-[13px] cursor-pointer group"
+				style={{ color: "var(--color-text-muted)" }}
 			>
-				<SparkleIcon className="w-3.5 h-3.5 flex-shrink-0 opacity-70" />
-
-				<span className="font-medium truncate">{headerLabel}</span>
-
+				<ThinkingIcon className="w-4 h-4 flex-shrink-0 opacity-60" />
+				<span className="font-medium">
+					{headerLabel}
+				</span>
 				{isActive && (
-					<span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse flex-shrink-0" />
+					<span
+						className="w-1.5 h-1.5 rounded-full animate-pulse flex-shrink-0"
+						style={{ background: "var(--color-accent)" }}
+					/>
 				)}
-
 				<ChevronIcon
-					className={`w-3 h-3 ml-auto flex-shrink-0 transition-transform duration-200 ${
+					className={`w-3.5 h-3.5 ml-1 flex-shrink-0 transition-transform duration-200 ${
 						isOpen ? "" : "-rotate-90"
 					}`}
 				/>
 			</button>
 
-			{/* Collapsible content (smooth CSS grid animation) */}
+			{/* Collapsible content */}
 			<div
 				className="grid transition-[grid-template-rows] duration-200 ease-out"
-				style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}
+				style={{
+					gridTemplateRows: isOpen ? "1fr" : "0fr",
+				}}
 			>
 				<div className="overflow-hidden">
-					<div className="px-3 pb-3 space-y-2">
-						{/* Reasoning text block */}
-						{reasoningText && (
-							<ReasoningText
-								text={reasoningText}
-								isStreaming={isReasoningStreaming}
+					<div className="relative pt-2 pb-1">
+						{/* Timeline connector line */}
+						<div
+							className="absolute w-px"
+							style={{
+								left: 9,
+								top: 16,
+								bottom: 8,
+								background: "var(--color-border)",
+							}}
+						/>
+						{statusParts.map((sp, idx) => (
+							<StatusStep
+								key={`status-${idx}`}
+								label={sp.label}
+								isActive={sp.isActive}
 							/>
-						)}
-
-						{/* Tool step timeline */}
-						{tools.length > 0 && (
-							<div className="flex flex-col gap-1">
-								{tools.map((tool) => (
-									<ToolStep key={tool.toolCallId} {...tool} />
-								))}
+						))}
+						{reasoningText && (
+							<div className="flex items-start gap-2.5 py-1.5">
+								<div
+									className="relative z-10 flex-shrink-0 w-5 h-5 mt-0.5 flex items-center justify-center rounded-full"
+									style={{
+										background: "var(--color-bg)",
+									}}
+								>
+									<svg
+										width="14"
+										height="14"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="var(--color-text-muted)"
+										strokeWidth="2"
+										strokeLinecap="round"
+										strokeLinejoin="round"
+									>
+										<path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z" />
+										<path d="M10 21h4" />
+									</svg>
+								</div>
+								<div className="flex-1 min-w-0">
+									<ReasoningBlock
+										text={reasoningText}
+										isStreaming={
+											isReasoningStreaming
+										}
+									/>
+								</div>
 							</div>
 						)}
+						{visualItems.map((item, idx) => {
+							if (item.type === "media-group") {
+								return (
+									<MediaGroup
+										key={idx}
+										mediaKind={item.mediaKind}
+										items={item.items}
+									/>
+								);
+							}
+							return (
+								<ToolStep
+									key={item.tool.toolCallId}
+									{...item.tool}
+								/>
+							);
+						})}
 					</div>
 				</div>
 			</div>
@@ -127,10 +594,9 @@ export function ChainOfThought({ parts }: { parts: ChainPart[] }) {
 	);
 }
 
-/* ─── Sub-components ─── */
+/* ─── Reasoning block ─── */
 
-/** Expandable reasoning text display */
-function ReasoningText({
+function ReasoningBlock({
 	text,
 	isStreaming,
 }: {
@@ -138,27 +604,34 @@ function ReasoningText({
 	isStreaming: boolean;
 }) {
 	const [expanded, setExpanded] = useState(false);
-	const isLong = text.length > 300;
+	const isLong = text.length > 400;
 
 	return (
-		<div>
+		<div className="mb-2">
 			<div
-				className={`text-[11px] text-[var(--color-text-muted)] whitespace-pre-wrap leading-relaxed opacity-60 ${
+				className={`text-[13px] whitespace-pre-wrap leading-relaxed ${
 					!expanded && isLong
-						? "max-h-20 overflow-hidden"
-						: "max-h-64 overflow-y-auto"
+						? "max-h-24 overflow-hidden"
+						: ""
 				}`}
+				style={{ color: "var(--color-text-secondary)" }}
 			>
 				{text}
 				{isStreaming && (
-					<span className="inline-block w-1 h-3 ml-0.5 bg-[var(--color-accent)] opacity-60 animate-pulse align-text-bottom" />
+					<span
+						className="inline-block w-1 h-3.5 ml-0.5 animate-pulse align-text-bottom rounded-sm"
+						style={{
+							background: "var(--color-accent)",
+						}}
+					/>
 				)}
 			</div>
 			{isLong && !expanded && (
 				<button
 					type="button"
 					onClick={() => setExpanded(true)}
-					className="text-[11px] text-[var(--color-accent)] hover:underline mt-0.5 cursor-pointer"
+					className="text-[12px] hover:underline mt-1 cursor-pointer"
+					style={{ color: "var(--color-accent)" }}
 				>
 					Show more
 				</button>
@@ -167,7 +640,324 @@ function ReasoningText({
 	);
 }
 
-/** Rich tool step with args display and collapsible output */
+/* ─── Status step (lifecycle / compaction indicators) ─── */
+
+function StatusStep({
+	label,
+	isActive,
+}: {
+	label: string;
+	isActive: boolean;
+}) {
+	return (
+		<div className="flex items-center gap-2.5 py-1.5">
+			<div
+				className="relative z-10 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-full"
+				style={{ background: "var(--color-bg)" }}
+			>
+				{isActive ? (
+					<span
+						className="w-4 h-4 border-[1.5px] rounded-full animate-spin"
+						style={{
+							borderColor: "var(--color-border-strong)",
+							borderTopColor: "var(--color-accent)",
+						}}
+					/>
+				) : (
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="var(--color-success, var(--color-accent))"
+						strokeWidth="2"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+					>
+						<path d="M20 6 9 17l-5-5" />
+					</svg>
+				)}
+			</div>
+			<span
+				className="text-[13px] leading-snug"
+				style={{
+					color: isActive
+						? "var(--color-text)"
+						: "var(--color-text-secondary)",
+				}}
+			>
+				{label}
+			</span>
+		</div>
+	);
+}
+
+/* ─── Media group (images, videos, PDFs, audio) ─── */
+
+function MediaGroup({
+	mediaKind,
+	items,
+}: {
+	mediaKind: "image" | "video" | "pdf" | "audio";
+	items: Array<{ path: string; tool: ToolPart }>;
+}) {
+	const [expanded, setExpanded] = useState(false);
+	const anyRunning = items.some(
+		(i) => i.tool.status === "running",
+	);
+
+	// Show completed items progressively — don't wait for allDone
+	const completedItems = items.filter(
+		(i) => i.tool.status === "done",
+	);
+	const doneCount = completedItems.length;
+
+	const label = anyRunning
+		? `Reading ${items.length} ${mediaKind}${items.length > 1 ? "s" : ""}...`
+		: mediaKind === "image"
+			? items.length === 1
+				? `Read 1 image`
+				: `Read ${items.length} images`
+			: mediaKind === "video"
+				? items.length === 1
+					? `Read 1 video`
+					: `Read ${items.length} videos`
+				: mediaKind === "pdf"
+					? items.length === 1
+						? `Read 1 PDF`
+						: `Read ${items.length} PDFs`
+					: items.length === 1
+						? `Read 1 audio file`
+						: `Read ${items.length} audio files`;
+
+	// Show up to 6 thumbnails by default, expandable
+	const PREVIEW_COUNT = 6;
+	const displayItems = expanded
+		? completedItems
+		: completedItems.slice(0, PREVIEW_COUNT);
+	const hasMore =
+		completedItems.length > PREVIEW_COUNT && !expanded;
+
+	return (
+		<div className="flex items-start gap-2.5 py-1.5">
+			<div
+				className="relative z-10 flex-shrink-0 w-5 h-5 mt-0.5 flex items-center justify-center rounded-full"
+				style={{ background: "var(--color-bg)" }}
+			>
+				{anyRunning ? (
+					<span
+						className="w-4 h-4 border-[1.5px] rounded-full animate-spin"
+						style={{
+							borderColor: "var(--color-border-strong)",
+							borderTopColor: "var(--color-accent)",
+						}}
+					/>
+				) : (
+					<StepIcon
+						kind={
+							mediaKind === "image"
+								? "image"
+								: "read"
+						}
+					/>
+				)}
+			</div>
+			<div className="flex-1 min-w-0">
+				<div
+					className="text-[13px] leading-snug mb-1.5"
+					style={{
+						color: anyRunning
+							? "var(--color-text)"
+							: "var(--color-text-secondary)",
+					}}
+				>
+					{label}
+				</div>
+
+				{/* Image thumbnail grid — show progressively as items complete */}
+				{doneCount > 0 && mediaKind === "image" && (
+					<div className="flex flex-wrap gap-1.5">
+						{displayItems.map((item) => (
+							<MediaThumb
+								key={item.tool.toolCallId}
+								path={item.path}
+								single={items.length === 1}
+							/>
+						))}
+						{anyRunning && (
+							<div
+								className="flex items-center justify-center rounded-lg"
+								style={{
+									width: 80,
+									height: 80,
+									background:
+										"var(--color-surface-hover)",
+									border: "1px solid var(--color-border)",
+								}}
+							>
+								<span
+									className="w-4 h-4 border-[1.5px] rounded-full animate-spin"
+									style={{
+										borderColor:
+											"var(--color-border-strong)",
+										borderTopColor:
+											"var(--color-accent)",
+									}}
+								/>
+							</div>
+						)}
+						{hasMore && (
+							<button
+								type="button"
+								onClick={() => setExpanded(true)}
+								className="flex items-center justify-center rounded-lg text-xs font-medium cursor-pointer"
+								style={{
+									width: 80,
+									height: 80,
+									background:
+										"var(--color-surface-hover)",
+									color: "var(--color-text-muted)",
+									border: "1px solid var(--color-border)",
+								}}
+							>
+								+
+								{completedItems.length -
+									PREVIEW_COUNT}{" "}
+								more
+							</button>
+						)}
+					</div>
+				)}
+
+				{/* Video inline */}
+				{doneCount > 0 && mediaKind === "video" && (
+					<div className="flex flex-wrap gap-2">
+						{displayItems.map((item) => (
+							<video
+								key={item.tool.toolCallId}
+								src={resolveMediaUrl(item.path)}
+								controls
+								preload="metadata"
+								className="rounded-lg max-w-[240px] max-h-[160px]"
+								style={{
+									border: "1px solid var(--color-border)",
+								}}
+							/>
+						))}
+					</div>
+				)}
+
+				{/* PDF links */}
+				{doneCount > 0 && mediaKind === "pdf" && (
+					<div className="flex flex-col gap-1.5">
+						{displayItems.map((item) => {
+							const filename =
+								item.path.split("/").pop() ??
+								item.path;
+							return (
+								<a
+									key={item.tool.toolCallId}
+									href={resolveMediaUrl(
+										item.path,
+									)}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-[12px]"
+									style={{
+										background:
+											"var(--color-surface-hover)",
+										color: "var(--color-text-secondary)",
+										border: "1px solid var(--color-border)",
+									}}
+								>
+									<PdfIcon />
+									<span className="truncate max-w-[200px]">
+										{filename}
+									</span>
+								</a>
+							);
+						})}
+					</div>
+				)}
+
+				{/* Audio inline */}
+				{doneCount > 0 && mediaKind === "audio" && (
+					<div className="flex flex-col gap-1.5">
+						{displayItems.map((item) => (
+							<audio
+								key={item.tool.toolCallId}
+								src={resolveMediaUrl(item.path)}
+								controls
+								preload="metadata"
+								className="max-w-[280px] h-8"
+							/>
+						))}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+/** Image thumbnail with error fallback */
+function MediaThumb({
+	path,
+	single,
+}: {
+	path: string;
+	single: boolean;
+}) {
+	const [error, setError] = useState(false);
+	const filename = path.split("/").pop() ?? path;
+	const url = resolveMediaUrl(path);
+	const w = single ? 200 : 80;
+	const h = single ? 150 : 80;
+
+	if (error) {
+		return (
+			<div
+				className="flex items-center justify-center rounded-lg text-[10px] text-center p-1"
+				style={{
+					width: w,
+					height: h,
+					background: "var(--color-surface-hover)",
+					color: "var(--color-text-muted)",
+					border: "1px solid var(--color-border)",
+				}}
+				title={path}
+			>
+				<span className="truncate">{filename}</span>
+			</div>
+		);
+	}
+
+	return (
+		<a
+			href={url}
+			target="_blank"
+			rel="noopener noreferrer"
+			className="block rounded-lg overflow-hidden flex-shrink-0"
+			style={{
+				border: "1px solid var(--color-border)",
+				width: w,
+				height: h,
+			}}
+			title={filename}
+		>
+			{/* eslint-disable-next-line @next/next/no-img-element */}
+			<img
+				src={url}
+				alt={filename}
+				className="w-full h-full object-cover"
+				loading="lazy"
+				onError={() => setError(true)}
+			/>
+		</a>
+	);
+}
+
+/* ─── Tool step (non-media) ─── */
+
 function ToolStep({
 	toolName,
 	status,
@@ -182,251 +972,407 @@ function ToolStep({
 	errorText?: string;
 }) {
 	const [showOutput, setShowOutput] = useState(false);
-	const displayType = getToolDisplayType(toolName);
-	const primaryArg = getPrimaryArg(toolName, args);
+	const kind = classifyTool(toolName);
+	const label = buildStepLabel(kind, toolName, args, output);
+	const domains =
+		(kind === "search" || kind === "fetch") && status === "done"
+			? getSearchDomains(output)
+			: [];
 	const outputText =
 		typeof output?.text === "string" ? output.text : undefined;
-	const exitCode =
-		output?.exitCode !== undefined ? Number(output.exitCode) : undefined;
+
+	// For single-file reads that are media, render inline preview
+	const filePath = getFilePath(args, output);
+	const media = filePath ? detectMedia(filePath) : null;
+	const isSingleMedia = kind === "read" && media && status === "done";
 
 	return (
-		<div className="flex flex-col gap-1">
-			{/* Tool name + status */}
-			<div className="flex items-center gap-2 text-xs">
-				{status === "running" && (
-					<span className="w-3 h-3 border border-[var(--color-text-muted)] border-t-[var(--color-accent)] rounded-full animate-spin flex-shrink-0" />
-				)}
-				{status === "done" && (
-					<CheckIcon className="w-3 h-3 text-green-400 flex-shrink-0" />
-				)}
-				{status === "error" && (
-					<XIcon className="w-3 h-3 text-red-400 flex-shrink-0" />
-				)}
-
-				<span
-					className={`font-medium truncate ${
-						status === "running"
-							? "text-[var(--color-text)]"
-							: "text-[var(--color-text-muted)]"
-					}`}
-				>
-					{formatToolName(toolName)}
-				</span>
-
-				{/* Exit code badge for bash/exec tools */}
-				{exitCode !== undefined && exitCode !== 0 && (
-					<span className="text-[10px] text-red-400 font-mono">
-						exit {exitCode}
-					</span>
+		<div className="flex items-start gap-2.5 py-1.5">
+			<div
+				className="relative z-10 flex-shrink-0 w-5 h-5 mt-0.5 flex items-center justify-center rounded-full"
+				style={{ background: "var(--color-bg)" }}
+			>
+				{status === "running" ? (
+					<span
+						className="w-4 h-4 border-[1.5px] rounded-full animate-spin"
+						style={{
+							borderColor: "var(--color-border-strong)",
+							borderTopColor: "var(--color-accent)",
+						}}
+					/>
+				) : status === "error" ? (
+					<ErrorCircleIcon />
+				) : (
+					<StepIcon kind={kind} />
 				)}
 			</div>
 
-			{/* Primary argument: command, path, query, code, etc. */}
-			{primaryArg && (
-				<div className="ml-5">
-					{displayType === "bash" ? (
-						<CodeBlock
-							content={`$ ${primaryArg}`}
-							maxLines={3}
-						/>
-					) : displayType === "code" ? (
-						<CodeBlock content={primaryArg} maxLines={8} />
-					) : (
-						<div className="text-[11px] font-mono text-[var(--color-text-muted)] opacity-70 truncate">
-							{primaryArg}
+			<div className="flex-1 min-w-0">
+				<div
+					className="text-[13px] leading-snug"
+					style={{
+						color:
+							status === "running"
+								? "var(--color-text)"
+								: "var(--color-text-secondary)",
+					}}
+				>
+					{label}
+				</div>
+
+				{/* Single media inline preview (when not grouped) */}
+				{isSingleMedia && filePath && media === "image" && (
+					<div className="mt-1.5">
+						<MediaThumb path={filePath} single />
+					</div>
+				)}
+
+				{isSingleMedia && filePath && media === "video" && (
+					<video
+						src={resolveMediaUrl(filePath)}
+						controls
+						preload="metadata"
+						className="mt-1.5 rounded-lg max-w-[240px] max-h-[160px]"
+						style={{
+							border: "1px solid var(--color-border)",
+						}}
+					/>
+				)}
+
+				{isSingleMedia && filePath && media === "pdf" && (
+					<a
+						href={resolveMediaUrl(filePath)}
+						target="_blank"
+						rel="noopener noreferrer"
+						className="inline-flex items-center gap-2 mt-1.5 px-3 py-2 rounded-lg text-[12px]"
+						style={{
+							background: "var(--color-surface-hover)",
+							color: "var(--color-text-secondary)",
+							border: "1px solid var(--color-border)",
+						}}
+					>
+						<PdfIcon />
+						<span className="truncate max-w-[200px]">
+							{filePath.split("/").pop() ?? filePath}
+						</span>
+					</a>
+				)}
+
+				{isSingleMedia && filePath && media === "audio" && (
+					<audio
+						src={resolveMediaUrl(filePath)}
+						controls
+						preload="metadata"
+						className="mt-1.5 max-w-[280px] h-8"
+					/>
+				)}
+
+				{/* Search domain badges */}
+				{domains.length > 0 && (
+					<div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+						{domains.map((domain) => (
+							<DomainBadge
+								key={domain}
+								domain={domain}
+							/>
+						))}
+					</div>
+				)}
+
+				{(kind === "search" || kind === "fetch") &&
+					status === "running" &&
+					args && (
+						<div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+							<span
+								className="inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px]"
+								style={{
+									background:
+										"var(--color-surface-hover)",
+									color: "var(--color-text-muted)",
+									border: "1px solid var(--color-border)",
+								}}
+							>
+								<span
+									className="w-2 h-2 rounded-full animate-pulse"
+									style={{
+										background:
+											"var(--color-accent)",
+									}}
+								/>
+								{kind === "fetch"
+									? "Fetching..."
+									: "Searching..."}
+							</span>
 						</div>
 					)}
-				</div>
-			)}
 
-			{/* Error message */}
-			{status === "error" && errorText && (
-				<div className="ml-5 text-[11px] text-red-400 font-mono bg-red-900/10 rounded px-2 py-1">
-					{errorText}
-				</div>
-			)}
-
-			{/* Tool output */}
-			{outputText && status === "done" && (
-				<div className="ml-5">
-					<button
-						type="button"
-						onClick={() => setShowOutput((v) => !v)}
-						className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
+				{status === "error" && errorText && (
+					<div
+						className="mt-1.5 text-[12px] font-mono rounded-lg px-2.5 py-1.5"
+						style={{
+							color: "var(--color-error)",
+							background:
+								"color-mix(in srgb, var(--color-error) 6%, var(--color-surface))",
+						}}
 					>
-						{showOutput ? "Hide output" : "Show output"}
-					</button>
-					{showOutput && (
-						<CodeBlock
-							content={outputText}
-							maxLines={20}
-						/>
+						{errorText}
+					</div>
+				)}
+
+				{/* Output toggle — skip for media files and search */}
+				{outputText &&
+					status === "done" &&
+					kind !== "search" &&
+					!isSingleMedia && (
+						<div className="mt-1">
+							<button
+								type="button"
+								onClick={() =>
+									setShowOutput((v) => !v)
+								}
+								className="text-[11px] hover:underline cursor-pointer"
+								style={{
+									color: "var(--color-accent)",
+								}}
+							>
+								{showOutput
+									? "Hide output"
+									: "Show output"}
+							</button>
+							{showOutput && (
+								<pre
+									className="mt-1 text-[11px] font-mono rounded-lg px-2.5 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-48 overflow-y-auto leading-relaxed"
+									style={{
+										color: "var(--color-text-muted)",
+										background: "var(--color-bg)",
+									}}
+								>
+									{outputText.length > 2000
+										? outputText.slice(0, 2000) +
+											"\n..."
+										: outputText}
+								</pre>
+							)}
+						</div>
 					)}
-				</div>
-			)}
+			</div>
 		</div>
 	);
 }
 
-/** Monospace code block with optional line limit */
-function CodeBlock({
-	content,
-	maxLines = 10,
-}: {
-	content: string;
-	maxLines?: number;
-}) {
-	const [expanded, setExpanded] = useState(false);
-	const lines = content.split("\n");
-	const isLong = lines.length > maxLines;
-	const displayContent =
-		!expanded && isLong
-			? lines.slice(0, maxLines).join("\n") + "\n..."
-			: content;
+/* ─── Domain badge with favicon ─── */
 
+function DomainBadge({ domain }: { domain: string }) {
+	const short = domain.replace(/^www\./, "");
 	return (
-		<div>
-			<pre className="text-[11px] font-mono text-[var(--color-text-muted)] bg-[var(--color-bg)] rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all max-h-64 overflow-y-auto leading-relaxed">
-				{displayContent}
-			</pre>
-			{isLong && !expanded && (
-				<button
-					type="button"
-					onClick={() => setExpanded(true)}
-					className="text-[10px] text-[var(--color-accent)] hover:underline mt-0.5 cursor-pointer"
-				>
-					Show all {lines.length} lines
-				</button>
-			)}
-		</div>
+		<span
+			className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px]"
+			style={{
+				background: "var(--color-surface-hover)",
+				color: "var(--color-text-secondary)",
+				border: "1px solid var(--color-border)",
+			}}
+		>
+			{/* eslint-disable-next-line @next/next/no-img-element */}
+			<img
+				src={faviconUrl(domain)}
+				alt=""
+				width={14}
+				height={14}
+				className="rounded-sm flex-shrink-0"
+				loading="lazy"
+			/>
+			{short}
+		</span>
 	);
 }
 
-/* ─── Tool classification helpers ─── */
+/* ─── Step icons ─── */
 
-type ToolDisplayType = "bash" | "code" | "file" | "search" | "generic";
+function StepIcon({ kind }: { kind: StepKind }) {
+	const color = "var(--color-text-muted)";
+	const size = 16;
 
-function getToolDisplayType(toolName: string): ToolDisplayType {
-	const name = toolName.toLowerCase().replace(/[_-]/g, "");
-	if (
-		["bash", "shell", "execute", "exec", "terminal", "command"].some((k) =>
-			name.includes(k),
-		)
-	)
-		return "bash";
-	if (
-		["runcode", "python", "javascript", "typescript", "notebook"].some(
-			(k) => name.includes(k),
-		)
-	)
-		return "code";
-	if (
-		["file", "read", "write", "create", "edit", "str_replace"].some((k) =>
-			name.includes(k),
-		)
-	)
-		return "file";
-	if (
-		["search", "web", "grep", "find", "glob"].some((k) =>
-			name.includes(k),
-		)
-	)
-		return "search";
-	return "generic";
-}
-
-function getPrimaryArg(
-	toolName: string,
-	args?: Record<string, unknown>,
-): string | undefined {
-	if (!args) return undefined;
-	const type = getToolDisplayType(toolName);
-	switch (type) {
-		case "bash":
-			return strArg(args, "command") ?? strArg(args, "cmd");
-		case "code":
-			return strArg(args, "code") ?? strArg(args, "script");
-		case "file":
-			return (
-				strArg(args, "path") ??
-				strArg(args, "file") ??
-				strArg(args, "file_path")
-			);
+	switch (kind) {
 		case "search":
 			return (
-				strArg(args, "query") ??
-				strArg(args, "search") ??
-				strArg(args, "pattern") ??
-				strArg(args, "q")
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<circle cx="11" cy="11" r="8" />
+					<path d="m21 21-4.3-4.3" />
+				</svg>
 			);
-		default: {
-			// Return first short string arg
-			for (const val of Object.values(args)) {
-				if (typeof val === "string" && val.length > 0 && val.length < 200) return val;
-			}
-			return undefined;
-		}
-	}
-}
-
-/** Safely extract a string value from an args object */
-function strArg(
-	args: Record<string, unknown>,
-	key: string,
-): string | undefined {
-	const val = args[key];
-	return typeof val === "string" && val.length > 0 ? val : undefined;
-}
-
-/** Build a short summary for the active tool (shown in collapsed header) */
-function getToolSummary(
-	toolName: string,
-	args?: Record<string, unknown>,
-): string | undefined {
-	if (!args) return undefined;
-	const type = getToolDisplayType(toolName);
-	const primary = getPrimaryArg(toolName, args);
-	if (!primary) return undefined;
-
-	switch (type) {
-		case "bash": {
-			// Show first 40 chars of command
-			const short =
-				primary.length > 40 ? primary.slice(0, 40) + "..." : primary;
-			return `Running: ${short}`;
-		}
-		case "file": {
-			return `Reading ${primary.split("/").pop()}`;
-		}
-		case "search": {
-			return `Searching: ${primary}`;
-		}
+		case "fetch":
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<circle cx="12" cy="12" r="10" />
+					<path d="M2 12h20" />
+					<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+				</svg>
+			);
+		case "read":
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+					<path d="M14 2v4a2 2 0 0 0 2 2h4" />
+				</svg>
+			);
+		case "exec":
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<polyline points="4 17 10 11 4 5" />
+					<line x1="12" x2="20" y1="19" y2="19" />
+				</svg>
+			);
+		case "write":
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+					<path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" />
+				</svg>
+			);
+		case "image":
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<rect
+						width="18"
+						height="18"
+						x="3"
+						y="3"
+						rx="2"
+						ry="2"
+					/>
+					<circle cx="9" cy="9" r="2" />
+					<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+				</svg>
+			);
 		default:
-			return undefined;
+			return (
+				<svg
+					width={size}
+					height={size}
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke={color}
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
+					<circle cx="12" cy="12" r="1" />
+				</svg>
+			);
 	}
 }
 
-/* ─── Helpers ─── */
-
-/** Convert tool_name_like_this → Tool Name Like This */
-function formatToolName(name: string): string {
-	return name
-		.replace(/_/g, " ")
-		.replace(/\b\w/g, (c) => c.toUpperCase())
-		.trim();
+function ErrorCircleIcon() {
+	return (
+		<svg
+			width="16"
+			height="16"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="var(--color-error)"
+			strokeWidth="2"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+		>
+			<circle cx="12" cy="12" r="10" />
+			<line x1="15" x2="9" y1="9" y2="15" />
+			<line x1="9" x2="15" y1="9" y2="15" />
+		</svg>
+	);
 }
 
-/* ─── Inline SVG icons (avoids adding lucide-react dep) ─── */
+function PdfIcon() {
+	return (
+		<svg
+			width="14"
+			height="14"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="2"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+		>
+			<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+			<path d="M14 2v4a2 2 0 0 0 2 2h4" />
+			<path d="M10 9H8" />
+			<path d="M16 13H8" />
+			<path d="M16 17H8" />
+		</svg>
+	);
+}
 
-function SparkleIcon({ className }: { className?: string }) {
+/* ─── Header icons ─── */
+
+function ThinkingIcon({ className }: { className?: string }) {
 	return (
 		<svg
 			className={className}
-			viewBox="0 0 16 16"
-			fill="currentColor"
-			xmlns="http://www.w3.org/2000/svg"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="2"
+			strokeLinecap="round"
+			strokeLinejoin="round"
 		>
-			<path d="M8 0L9.8 6.2L16 8L9.8 9.8L8 16L6.2 9.8L0 8L6.2 6.2Z" />
+			<path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z" />
+			<path d="M10 21h4" />
+			<path d="M9 9.4a3 3 0 0 1 5.1-2" />
 		</svg>
 	);
 }
@@ -443,38 +1389,6 @@ function ChevronIcon({ className }: { className?: string }) {
 			strokeLinejoin="round"
 		>
 			<path d="M3 4.5L6 7.5L9 4.5" />
-		</svg>
-	);
-}
-
-function CheckIcon({ className }: { className?: string }) {
-	return (
-		<svg
-			className={className}
-			viewBox="0 0 12 12"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="1.5"
-			strokeLinecap="round"
-			strokeLinejoin="round"
-		>
-			<path d="M2.5 6L5 8.5L9.5 3.5" />
-		</svg>
-	);
-}
-
-function XIcon({ className }: { className?: string }) {
-	return (
-		<svg
-			className={className}
-			viewBox="0 0 12 12"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="1.5"
-			strokeLinecap="round"
-			strokeLinejoin="round"
-		>
-			<path d="M3 3L9 9M9 3L3 9" />
 		</svg>
 	);
 }

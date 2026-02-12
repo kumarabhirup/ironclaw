@@ -10,12 +10,15 @@ export default function Home() {
     >
       {/* Logo / brand mark */}
       <div
-        className="mb-6 w-16 h-16 rounded-2xl flex items-center justify-center"
-        style={{ background: "rgba(232, 93, 58, 0.12)" }}
+        className="mb-8 w-16 h-16 rounded-2xl flex items-center justify-center"
+        style={{
+          background: "var(--color-accent-light)",
+          boxShadow: "var(--shadow-md)",
+        }}
       >
         <svg
-          width="32"
-          height="32"
+          width="28"
+          height="28"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -33,35 +36,29 @@ export default function Home() {
 
       {/* Heading */}
       <h1
-        className="text-4xl font-bold tracking-tight mb-3 text-center"
+        className="font-instrument text-5xl md:text-6xl tracking-tight mb-3 text-center"
         style={{ color: "var(--color-text)" }}
       >
-        Ironclaw
+        Dench
       </h1>
 
       {/* Tagline */}
       <p
-        className="text-lg mb-8 text-center max-w-md"
+        className="text-base mb-10 text-center max-w-md leading-relaxed"
         style={{ color: "var(--color-text-muted)" }}
       >
-        Your AI workspace &mdash; chat, knowledge, skills, and memory in one place.
+        Your AI workspace &mdash; chat, knowledge, skills, and memory in one
+        place.
       </p>
 
       {/* CTA */}
       <Link
         href="/workspace"
-        className="inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-medium transition-colors"
+        className="inline-flex items-center gap-2.5 px-7 py-3.5 rounded-full text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98]"
         style={{
           background: "var(--color-accent)",
           color: "#fff",
-        }}
-        onMouseEnter={(e) => {
-          (e.currentTarget as HTMLElement).style.background =
-            "var(--color-accent-hover)";
-        }}
-        onMouseLeave={(e) => {
-          (e.currentTarget as HTMLElement).style.background =
-            "var(--color-accent)";
+          boxShadow: "var(--shadow-md)",
         }}
       >
         Open Workspace
@@ -80,9 +77,9 @@ export default function Home() {
         </svg>
       </Link>
 
-      {/* Subtle footer link */}
+      {/* Subtle footer */}
       <p
-        className="mt-12 text-xs"
+        className="mt-16 text-xs"
         style={{ color: "var(--color-text-muted)", opacity: 0.5 }}
       >
         Powered by OpenClaw

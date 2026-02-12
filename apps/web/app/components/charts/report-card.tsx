@@ -194,7 +194,7 @@ export function ReportCard({ config }: ReportCardProps) {
             className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] transition-colors"
             style={{
               color: "var(--color-accent)",
-              background: "rgba(232, 93, 58, 0.1)",
+              background: "var(--color-accent-light)",
             }}
           >
             <ExternalLinkIcon />

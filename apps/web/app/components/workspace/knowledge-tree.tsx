@@ -204,7 +204,7 @@ function TreeNodeItem({
           <span
             className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
             style={{
-              background: "rgba(232, 93, 58, 0.15)",
+              background: "var(--color-accent-light)",
               color: "var(--color-accent)",
             }}
           >

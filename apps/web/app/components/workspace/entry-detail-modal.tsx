@@ -49,6 +49,8 @@ type EntryDetailModalProps = {
   onNavigateEntry?: (objectName: string, entryId: string) => void;
   /** Navigate to an object table view. */
   onNavigateObject?: (objectName: string) => void;
+  /** Called after an edit or delete to refresh parent data. */
+  onRefresh?: () => void;
 };
 
 // --- Helpers ---
@@ -289,10 +291,15 @@ export function EntryDetailModal({
   onClose,
   onNavigateEntry,
   onNavigateObject,
+  onRefresh,
 }: EntryDetailModalProps) {
   const [data, setData] = useState<EntryDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const backdropRef = useRef<HTMLDivElement>(null);
 
   // Fetch entry data
@@ -348,6 +355,46 @@ export function EntryDetailModal({
     [onClose],
   );
 
+  // ── Edit handler ──
+  const handleSaveField = useCallback(async (fieldName: string, value: string) => {
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `/api/workspace/objects/${encodeURIComponent(objectName)}/entries/${encodeURIComponent(entryId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fields: { [fieldName]: value } }),
+        },
+      );
+      if (res.ok) {
+        // Update local data optimistically
+        setData((prev) => {
+          if (!prev) {return prev;}
+          return { ...prev, entry: { ...prev.entry, [fieldName]: value } };
+        });
+        setEditingField(null);
+        onRefresh?.();
+      }
+    } catch { /* ignore */ }
+    finally { setSaving(false); }
+  }, [objectName, entryId, onRefresh]);
+
+  // ── Delete handler ──
+  const handleDelete = useCallback(async () => {
+    if (!confirm("Are you sure you want to delete this entry?")) {return;}
+    setDeleting(true);
+    try {
+      await fetch(
+        `/api/workspace/objects/${encodeURIComponent(objectName)}/entries/${encodeURIComponent(entryId)}`,
+        { method: "DELETE" },
+      );
+      onRefresh?.();
+      onClose();
+    } catch { /* ignore */ }
+    finally { setDeleting(false); }
+  }, [objectName, entryId, onRefresh, onClose]);
+
   const displayField = data?.effectiveDisplayField;
   const title = displayField && data?.entry[displayField]
     ? String(data.entry[displayField])
@@ -380,9 +427,9 @@ export function EntryDetailModal({
               onClick={() => onNavigateObject?.(objectName)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium capitalize transition-colors hover:opacity-80 flex-shrink-0"
               style={{
-                background: "rgba(232, 93, 58, 0.1)",
+                background: "var(--color-accent-light)",
                 color: "var(--color-accent)",
-                border: "1px solid rgba(232, 93, 58, 0.2)",
+                border: "1px solid var(--color-border)",
               }}
               title={`Go to ${objectName}`}
             >
@@ -398,17 +445,33 @@ export function EntryDetailModal({
               {loading ? "Loading..." : title}
             </h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-md transition-colors flex-shrink-0"
-            style={{ color: "var(--color-text-muted)" }}
-            title="Close"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {/* Delete button */}
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={deleting}
+              className="p-1.5 rounded-lg flex-shrink-0"
+              style={{ color: "var(--color-error)" }}
+              title="Delete entry"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+              </svg>
+            </button>
+            {/* Close button */}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg flex-shrink-0"
+              style={{ color: "var(--color-text-muted)" }}
+              title="Close"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Content */}
@@ -447,13 +510,72 @@ export function EntryDetailModal({
                       className="text-sm min-h-[1.75rem] flex items-center"
                       style={{ color: "var(--color-text)" }}
                     >
-                      <FieldValue
-                        value={value}
-                        field={field}
-                        members={members}
-                        relationLabels={data.relationLabels}
-                        onNavigateEntry={onNavigateEntry}
-                      />
+                      {editingField === field.name ? (
+                        <form
+                          onSubmit={(e) => { e.preventDefault(); handleSaveField(field.name, editValue); }}
+                          className="flex items-center gap-2 w-full"
+                        >
+                          {field.type === "enum" && field.enum_values ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => { setEditValue(e.target.value); handleSaveField(field.name, e.target.value); }}
+                              autoFocus
+                              className="flex-1 px-2 py-1 text-sm rounded-lg outline-none"
+                              style={{ background: "var(--color-surface-hover)", color: "var(--color-text)", border: "2px solid var(--color-accent)" }}
+                            >
+                              <option value="">--</option>
+                              {field.enum_values.map((v) => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                          ) : field.type === "boolean" ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => { setEditValue(e.target.value); handleSaveField(field.name, e.target.value); }}
+                              autoFocus
+                              className="flex-1 px-2 py-1 text-sm rounded-lg outline-none"
+                              style={{ background: "var(--color-surface-hover)", color: "var(--color-text)", border: "2px solid var(--color-accent)" }}
+                            >
+                              <option value="true">Yes</option>
+                              <option value="false">No</option>
+                            </select>
+                          ) : (
+                            <>
+                              <input
+                                type={field.type === "number" ? "number" : field.type === "date" ? "date" : "text"}
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                autoFocus
+                                className="flex-1 px-2 py-1 text-sm rounded-lg outline-none"
+                                style={{ background: "var(--color-surface-hover)", color: "var(--color-text)", border: "2px solid var(--color-accent)" }}
+                              />
+                              <button type="submit" disabled={saving} className="px-2 py-1 text-xs rounded-lg font-medium" style={{ background: "var(--color-accent)", color: "white" }}>
+                                {saving ? "..." : "Save"}
+                              </button>
+                            </>
+                          )}
+                          <button type="button" onClick={() => setEditingField(null)} className="px-2 py-1 text-xs rounded-lg" style={{ color: "var(--color-text-muted)", border: "1px solid var(--color-border)" }}>
+                            Cancel
+                          </button>
+                        </form>
+                      ) : (
+                        <div
+                          className={`flex-1 ${!["relation", "user"].includes(field.type) ? "cursor-pointer hover:opacity-80" : ""}`}
+                          onClick={() => {
+                            if (!["relation", "user"].includes(field.type)) {
+                              setEditingField(field.name);
+                              setEditValue(String(value ?? ""));
+                            }
+                          }}
+                          title={!["relation", "user"].includes(field.type) ? "Click to edit" : undefined}
+                        >
+                          <FieldValue
+                            value={value}
+                            field={field}
+                            members={members}
+                            relationLabels={data.relationLabels}
+                            onNavigateEntry={onNavigateEntry}
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

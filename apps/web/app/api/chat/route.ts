@@ -86,6 +86,9 @@ export async function POST(req: Request) {
 			// onLifecycleEnd closes the text part (textStarted→false), so
 			// onClose can't rely on textStarted alone to detect "no output".
 			let everSentText = false;
+			// Track whether the status reasoning block is the one currently open
+			// so we can close it cleanly when real content arrives.
+			let statusReasoningActive = false;
 
 			/** Write an SSE event; silently no-ops if the stream was already cancelled. */
 			const writeEvent = (data: unknown) => {
@@ -102,6 +105,7 @@ export async function POST(req: Request) {
 						id: currentReasoningId,
 					});
 					reasoningStarted = false;
+					statusReasoningActive = false;
 				}
 			};
 
@@ -113,9 +117,38 @@ export async function POST(req: Request) {
 				}
 			};
 
+			/** Open a status reasoning block (auto-closes any existing one). */
+			const openStatusReasoning = (label: string) => {
+				closeReasoning();
+				closeText();
+				currentReasoningId = nextId("status");
+				writeEvent({
+					type: "reasoning-start",
+					id: currentReasoningId,
+				});
+				writeEvent({
+					type: "reasoning-delta",
+					id: currentReasoningId,
+					delta: label,
+				});
+				reasoningStarted = true;
+				statusReasoningActive = true;
+			};
+
 			try {
 				await runAgent(agentMessage, abortController.signal, {
+					onLifecycleStart: () => {
+						// Show immediate feedback — the agent has started working.
+						// This eliminates the "Streaming... (silence)" gap.
+						openStatusReasoning("Preparing response...");
+					},
+
 					onThinkingDelta: (delta) => {
+						// Close the status block if it's still the active one;
+						// real reasoning content is now arriving.
+						if (statusReasoningActive) {
+							closeReasoning();
+						}
 						if (!reasoningStarted) {
 							currentReasoningId = nextId("reasoning");
 							writeEvent({
@@ -196,6 +229,30 @@ export async function POST(req: Request) {
 								toolCallId,
 								output: buildToolOutput(result),
 							});
+						}
+					},
+
+					onCompactionStart: () => {
+						// Show compaction status while the gateway is
+						// optimizing the session context (can take 10-30s).
+						openStatusReasoning("Optimizing session context...");
+					},
+
+					onCompactionEnd: (willRetry) => {
+						// Close the compaction status block. If the gateway
+						// will retry the prompt, leave the reasoning area open
+						// so the next status/thinking block follows smoothly.
+						if (statusReasoningActive) {
+							if (willRetry) {
+								// Append a note, keep block open for retry
+								writeEvent({
+									type: "reasoning-delta",
+									id: currentReasoningId,
+									delta: "\nRetrying with compacted context...",
+								});
+							} else {
+								closeReasoning();
+							}
 						}
 					},
 

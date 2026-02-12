@@ -57,7 +57,7 @@ function loadDbObjects(): Map<string, DbObject> {
   return map;
 }
 
-/** Recursively build a tree of the knowledge/ directory. */
+/** Recursively build a tree from a workspace directory. */
 function buildTree(
   absDir: string,
   relativeBase: string,
@@ -133,15 +133,6 @@ function buildTree(
   }
 
   return nodes;
-}
-
-/** Classify a top-level file's type. */
-function classifyFileType(name: string): TreeNode["type"] {
-  if (name.endsWith(".report.json")) {return "report";}
-  if (isDatabaseFile(name)) {return "database";}
-  const ext = name.split(".").pop()?.toLowerCase();
-  if (ext === "md" || ext === "mdx") {return "document";}
-  return "file";
 }
 
 // --- Virtual folder builders ---
@@ -326,44 +317,10 @@ export async function GET() {
   // Load objects from DuckDB for smart directory detection
   const dbObjects = loadDbObjects();
 
-  const knowledgeDir = join(root, "knowledge");
-  const reportsDir = join(root, "reports");
-  const tree: TreeNode[] = [];
-
-  // Build knowledge tree (real files first)
-  if (existsSync(knowledgeDir)) {
-    tree.push(...buildTree(knowledgeDir, "knowledge", dbObjects));
-  }
-
-  // Build reports tree
-  if (existsSync(reportsDir)) {
-    const reportNodes = buildTree(reportsDir, "reports", dbObjects);
-    if (reportNodes.length > 0) {
-      tree.push({
-        name: "reports",
-        path: "reports",
-        type: "folder",
-        children: reportNodes,
-      });
-    }
-  }
-
-  // Add top-level files (WORKSPACE.md, workspace_context.yaml, workspace.duckdb, etc.)
-  try {
-    const topLevel = readdirSync(root, { withFileTypes: true });
-    for (const entry of topLevel) {
-      if (!entry.isFile()) {continue;}
-      if (entry.name.startsWith(".")) {continue;}
-
-      tree.push({
-        name: entry.name,
-        path: entry.name,
-        type: classifyFileType(entry.name),
-      });
-    }
-  } catch {
-    // skip if root unreadable
-  }
+  // Scan the entire dench root -- the dench folder IS the knowledge base.
+  // All top-level directories (manufacturing, knowledge, reports, etc.)
+  // and files are visible in the sidebar.
+  const tree = buildTree(root, "", dbObjects);
 
   // Workspace root files (USER.md, SOUL.md, etc.) -- editable but reserved
   const workspaceRootFiles = buildWorkspaceRootFiles();

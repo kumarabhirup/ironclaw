@@ -246,6 +246,9 @@ async function agentViaGatewayStreamJson(opts: AgentCliOpts, _runtime: RuntimeEn
     timeoutMs: gatewayTimeoutMs,
     clientName: GATEWAY_CLIENT_NAMES.CLI,
     mode: GATEWAY_CLIENT_MODES.CLI,
+    // Request tool-events capability so the gateway streams tool start/result
+    // events alongside assistant text, thinking, and lifecycle events.
+    caps: ["tool-events"],
     onEvent: (evt) => {
       // Emit each gateway event as an NDJSON line (chat deltas, agent tool/lifecycle events).
       emitNdjsonLine({ event: evt.event, ...(evt.payload as Record<string, unknown>) });

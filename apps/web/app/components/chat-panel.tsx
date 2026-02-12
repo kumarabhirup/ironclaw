@@ -57,9 +57,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		ref,
 	) {
 		const [input, setInput] = useState("");
-		const [currentSessionId, setCurrentSessionId] = useState<string | null>(
-			null,
-		);
+		const [currentSessionId, setCurrentSessionId] = useState<
+			string | null
+		>(null);
 		const [loadingSession, setLoadingSession] = useState(false);
 		const [startingNewSession, setStartingNewSession] = useState(false);
 		const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -72,27 +72,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		const isFirstFileMessageRef = useRef(true);
 
 		// File-scoped session list (compact mode only)
-		const [fileSessions, setFileSessions] = useState<FileScopedSession[]>(
-			[],
-		);
+		const [fileSessions, setFileSessions] = useState<
+			FileScopedSession[]
+		>([]);
 
 		const filePath = fileContext?.path ?? null;
 
 		// ── Ref-based session ID for transport ──
-		// The transport body function reads from this ref so it always has
-		// the latest session ID, even when called in the same event-loop
-		// tick as a state update (before the re-render).
 		const sessionIdRef = useRef<string | null>(null);
-
-		// Keep ref in sync with React state.
 		useEffect(() => {
 			sessionIdRef.current = currentSessionId;
 		}, [currentSessionId]);
 
 		// ── Transport (per-instance) ──
-		// Each ChatPanel mounts its own transport. For file-scoped chats the
-		// body function injects the sessionId so the API spawns an isolated
-		// agent process (subagent) per chat session.
 		const transport = useMemo(
 			() =>
 				new DefaultChatTransport({
@@ -108,11 +100,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		const { messages, sendMessage, status, stop, error, setMessages } =
 			useChat({ transport });
 
-		const isStreaming = status === "streaming" || status === "submitted";
+		const isStreaming =
+			status === "streaming" || status === "submitted";
 
 		// Auto-scroll to bottom on new messages
 		useEffect(() => {
-			messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+			messagesEndRef.current?.scrollIntoView({
+				behavior: "smooth",
+			});
 		}, [messages]);
 
 		// ── Session persistence helpers ──
@@ -120,7 +115,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		const createSession = useCallback(
 			async (title: string): Promise<string> => {
 				const body: Record<string, string> = { title };
-				if (filePath) {body.filePath = filePath;}
+				if (filePath) {
+					body.filePath = filePath;
+				}
 				const res = await fetch("/api/web-sessions", {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
@@ -164,8 +161,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							}),
 						},
 					);
-					for (const m of msgs)
-						{savedMessageIdsRef.current.add(m.id);}
+					for (const m of msgs) {
+						savedMessageIdsRef.current.add(m.id);
+					}
 					onSessionsChange?.();
 				} catch (err) {
 					console.error("Failed to save messages:", err);
@@ -195,15 +193,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		);
 
 		// ── File-scoped session initialization ──
-		// When the active file changes: reset chat state, fetch existing
-		// sessions for this file, and auto-load the most recent one.
-
 		const fetchFileSessionsRef = useRef<
 			(() => Promise<FileScopedSession[]>) | null
 		>(null);
 
 		fetchFileSessionsRef.current = async () => {
-			if (!filePath) {return [];}
+			if (!filePath) {
+				return [];
+			}
 			try {
 				const res = await fetch(
 					`/api/web-sessions?filePath=${encodeURIComponent(filePath)}`,
@@ -216,10 +213,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		};
 
 		useEffect(() => {
-			if (!filePath) {return;}
+			if (!filePath) {
+				return;
+			}
 			let cancelled = false;
 
-			// Reset state for the new file
 			sessionIdRef.current = null;
 			setCurrentSessionId(null);
 			onActiveSessionChange?.(null);
@@ -227,10 +225,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			savedMessageIdsRef.current.clear();
 			isFirstFileMessageRef.current = true;
 
-			// Fetch sessions and auto-load the most recent
 			(async () => {
-				const sessions = await fetchFileSessionsRef.current?.() ?? [];
-				if (cancelled) {return;}
+				const sessions =
+					(await fetchFileSessionsRef.current?.()) ?? [];
+				if (cancelled) {
+					return;
+				}
 				setFileSessions(sessions);
 
 				if (sessions.length > 0) {
@@ -240,12 +240,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 					onActiveSessionChange?.(latest.id);
 					isFirstFileMessageRef.current = false;
 
-					// Load messages for the most recent session
 					try {
 						const msgRes = await fetch(
 							`/api/web-sessions/${latest.id}`,
 						);
-						if (cancelled) {return;}
+						if (cancelled) {
+							return;
+						}
 						const msgData = await msgRes.json();
 						const sessionMessages: Array<{
 							id: string;
@@ -254,22 +255,26 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							parts?: Array<Record<string, unknown>>;
 						}> = msgData.messages || [];
 
-						const uiMessages = sessionMessages.map((msg) => {
-							savedMessageIdsRef.current.add(msg.id);
-							return {
-								id: msg.id,
-								role: msg.role,
-								parts: (msg.parts ?? [
-									{
-										type: "text" as const,
-										text: msg.content,
-									},
-								]) as UIMessage["parts"],
-							};
-						});
-						if (!cancelled) {setMessages(uiMessages);}
+						const uiMessages = sessionMessages.map(
+							(msg) => {
+								savedMessageIdsRef.current.add(msg.id);
+								return {
+									id: msg.id,
+									role: msg.role,
+									parts: (msg.parts ?? [
+										{
+											type: "text" as const,
+											text: msg.content,
+										},
+									]) as UIMessage["parts"],
+								};
+							},
+						);
+						if (!cancelled) {
+							setMessages(uiMessages);
+						}
 					} catch {
-						// ignore – start with empty messages
+						// ignore
 					}
 				}
 			})();
@@ -281,7 +286,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		}, [filePath]);
 
 		// ── Persist unsaved messages + live-reload after streaming ──
-
 		const prevStatusRef = useRef(status);
 		useEffect(() => {
 			const wasStreaming =
@@ -303,21 +307,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 					saveMessages(currentSessionId, toSave);
 				}
 
-				// Refresh file session list (title/count may have changed)
 				if (filePath) {
-					fetchFileSessionsRef.current?.().then((sessions) => {
-						setFileSessions(sessions);
-					});
+					fetchFileSessionsRef.current?.().then(
+						(sessions) => {
+							setFileSessions(sessions);
+						},
+					);
 				}
 
-				// Re-fetch file content for live reload after agent edits
 				if (filePath && onFileChanged) {
 					fetch(
 						`/api/workspace/file?path=${encodeURIComponent(filePath)}`,
 					)
 						.then((r) => r.json())
 						.then((data) => {
-							if (data.content) {onFileChanged(data.content);}
+							if (data.content) {
+								onFileChanged(data.content);
+							}
 						})
 						.catch(() => {});
 				}
@@ -337,7 +343,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 
 		const handleSubmit = async (e: React.FormEvent) => {
 			e.preventDefault();
-			if (!input.trim() || isStreaming) {return;}
+			if (!input.trim() || isStreaming) {
+				return;
+			}
 
 			const userText = input.trim();
 			setInput("");
@@ -347,7 +355,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				return;
 			}
 
-			// Create session if none exists yet
 			let sessionId = currentSessionId;
 			if (!sessionId) {
 				const title =
@@ -360,15 +367,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				onActiveSessionChange?.(sessionId);
 				onSessionsChange?.();
 
-				// Refresh file session tabs
 				if (filePath) {
-					fetchFileSessionsRef.current?.().then((sessions) => {
-						setFileSessions(sessions);
-					});
+					fetchFileSessionsRef.current?.().then(
+						(sessions) => {
+							setFileSessions(sessions);
+						},
+					);
 				}
 			}
 
-			// Prepend file path context for the first message in a file-scoped session
 			let messageText = userText;
 			if (fileContext && isFirstFileMessageRef.current) {
 				messageText = `[Context: workspace file '${fileContext.path}']\n\n${userText}`;
@@ -380,7 +387,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 
 		const handleSessionSelect = useCallback(
 			async (sessionId: string) => {
-				if (sessionId === currentSessionId) {return;}
+				if (sessionId === currentSessionId) {
+					return;
+				}
 
 				stop();
 				setLoadingSession(true);
@@ -388,14 +397,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				sessionIdRef.current = sessionId;
 				onActiveSessionChange?.(sessionId);
 				savedMessageIdsRef.current.clear();
-				isFirstFileMessageRef.current = false; // loaded session has context
+				isFirstFileMessageRef.current = false;
 
 				try {
 					const response = await fetch(
 						`/api/web-sessions/${sessionId}`,
 					);
-					if (!response.ok)
-						{throw new Error("Failed to load session");}
+					if (!response.ok) {
+						throw new Error("Failed to load session");
+					}
 
 					const data = await response.json();
 					const sessionMessages: Array<{
@@ -426,7 +436,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 					setLoadingSession(false);
 				}
 			},
-			[currentSessionId, setMessages, onActiveSessionChange, stop],
+			[
+				currentSessionId,
+				setMessages,
+				onActiveSessionChange,
+				stop,
+			],
 		);
 
 		const handleNewSession = useCallback(async () => {
@@ -439,22 +454,20 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			isFirstFileMessageRef.current = true;
 			newSessionPendingRef.current = false;
 
-			// Only send /new to backend for non-file sessions (main chat)
 			if (!filePath) {
 				setStartingNewSession(true);
 				try {
-					await fetch("/api/new-session", { method: "POST" });
+					await fetch("/api/new-session", {
+						method: "POST",
+					});
 				} catch (err) {
 					console.error("Failed to send /new:", err);
 				} finally {
 					setStartingNewSession(false);
 				}
 			}
-			// NOTE: we intentionally do NOT clear fileSessions so the
-			// session tab list remains intact.
 		}, [setMessages, onActiveSessionChange, filePath, stop]);
 
-		// Expose imperative handle for parent-driven session management
 		useImperativeHandle(
 			ref,
 			() => ({
@@ -514,7 +527,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							</>
 						) : (
 							<>
-								<h2 className="text-sm font-semibold">
+								<h2
+									className="text-sm font-semibold"
+									style={{
+										color: "var(--color-text)",
+									}}
+								>
 									{currentSessionId
 										? "Chat Session"
 										: "New Chat"}
@@ -535,20 +553,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							<button
 								type="button"
 								onClick={() => handleNewSession()}
-								className="p-1 rounded transition-colors"
-								style={{ color: "var(--color-text-muted)" }}
+								className="p-1.5 rounded-lg"
+								style={{
+									color: "var(--color-text-muted)",
+								}}
 								title="New chat"
-								onMouseEnter={(e) => {
-									(
-										e.currentTarget as HTMLElement
-									).style.background =
-										"var(--color-surface-hover)";
-								}}
-								onMouseLeave={(e) => {
-									(
-										e.currentTarget as HTMLElement
-									).style.background = "transparent";
-								}}
 							>
 								<svg
 									width="14"
@@ -569,10 +578,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							<button
 								type="button"
 								onClick={() => stop()}
-								className={`${compact ? "px-2 py-0.5 text-[10px]" : "px-3 py-1 text-xs"} rounded-md transition-colors`}
+								className={`${compact ? "px-2 py-0.5 text-[10px]" : "px-3 py-1 text-xs"} rounded-full font-medium`}
 								style={{
-									background: "var(--color-border)",
+									background:
+										"var(--color-surface-hover)",
 									color: "var(--color-text)",
+									border: "1px solid var(--color-border)",
 								}}
 							>
 								Stop
@@ -585,24 +596,31 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				{compact && fileContext && fileSessions.length > 0 && (
 					<div
 						className="px-2 py-1.5 border-b flex gap-1 overflow-x-auto flex-shrink-0"
-						style={{ borderColor: "var(--color-border)" }}
+						style={{
+							borderColor: "var(--color-border)",
+						}}
 					>
 						{fileSessions.slice(0, 10).map((s) => (
 							<button
 								key={s.id}
 								type="button"
-								onClick={() => handleSessionSelect(s.id)}
-								className="px-2 py-0.5 text-[10px] rounded-md whitespace-nowrap transition-colors flex-shrink-0"
+								onClick={() =>
+									handleSessionSelect(s.id)
+								}
+								className="px-2.5 py-1 text-[10px] rounded-full whitespace-nowrap flex-shrink-0 font-medium"
 								style={{
 									background:
 										s.id === currentSessionId
 											? "var(--color-accent)"
-											: "var(--color-surface)",
+											: "var(--color-surface-hover)",
 									color:
 										s.id === currentSessionId
 											? "white"
 											: "var(--color-text-muted)",
-									border: `1px solid ${s.id === currentSessionId ? "var(--color-accent)" : "var(--color-border)"}`,
+									border:
+										s.id === currentSessionId
+											? "none"
+											: "1px solid var(--color-border)",
 								}}
 							>
 								{s.title.length > 25
@@ -641,7 +659,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 						</div>
 					) : messages.length === 0 ? (
 						<div className="flex items-center justify-center h-full">
-							<div className="text-center">
+							<div className="text-center max-w-md px-4">
 								{compact ? (
 									<p
 										className="text-sm"
@@ -653,14 +671,16 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 									</p>
 								) : (
 									<>
-										<p className="text-6xl mb-4">
-											🦞
-										</p>
-										<h3 className="text-lg font-semibold mb-1">
-											Ironclaw Chat
+										<h3
+											className="font-instrument text-3xl tracking-tight mb-2"
+											style={{
+												color: "var(--color-text)",
+											}}
+										>
+											What can I help with?
 										</h3>
 										<p
-											className="text-sm"
+											className="text-sm leading-relaxed"
 											style={{
 												color: "var(--color-text-muted)",
 											}}
@@ -693,11 +713,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 					<div
 						className="px-3 py-2 border-t flex-shrink-0 flex items-center gap-2"
 						style={{
-							background:
-								"color-mix(in srgb, var(--color-error, #ef4444) 10%, var(--color-surface))",
-							borderColor:
-								"color-mix(in srgb, var(--color-error, #ef4444) 25%, transparent)",
-							color: "var(--color-error, #ef4444)",
+							background: `color-mix(in srgb, var(--color-error) 6%, var(--color-surface))`,
+							borderColor: `color-mix(in srgb, var(--color-error) 18%, transparent)`,
+							color: "var(--color-error)",
 						}}
 					>
 						<svg
@@ -712,71 +730,132 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							className="flex-shrink-0"
 						>
 							<circle cx="12" cy="12" r="10" />
-							<line x1="12" y1="8" x2="12" y2="12" />
-							<line x1="12" y1="16" x2="12.01" y2="16" />
+							<line
+								x1="12"
+								y1="8"
+								x2="12"
+								y2="12"
+							/>
+							<line
+								x1="12"
+								y1="16"
+								x2="12.01"
+								y2="16"
+							/>
 						</svg>
-						<p className="text-xs">
-							{error.message}
-						</p>
+						<p className="text-xs">{error.message}</p>
 					</div>
 				)}
 
-				{/* Input */}
+				{/* Input — Dench-style rounded area with toolbar */}
 				<div
-					className={`${compact ? "px-3 py-2" : "px-6 py-4"} border-t flex-shrink-0`}
-					style={{
-						borderColor: "var(--color-border)",
-						background: "var(--color-surface)",
-					}}
+					className={`${compact ? "px-3 py-2" : "px-6 py-4"} flex-shrink-0`}
+					style={{ background: "var(--color-bg)" }}
 				>
-					<form
-						onSubmit={handleSubmit}
-						className={`${compact ? "" : "max-w-3xl mx-auto"} flex gap-2`}
+					<div
+						className={`${compact ? "" : "max-w-3xl mx-auto"}`}
 					>
-						<input
-							type="text"
-							value={input}
-							onChange={(e) => setInput(e.target.value)}
-							placeholder={
-								compact && fileContext
-									? `Ask about ${fileContext.filename}...`
-									: "Message Ironclaw..."
-							}
-							disabled={
-								isStreaming ||
-								loadingSession ||
-								startingNewSession
-							}
-							className={`flex-1 ${compact ? "px-3 py-2 text-xs rounded-lg" : "px-4 py-3 text-sm rounded-xl"} border focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent disabled:opacity-50`}
+						<div
+							className="rounded-2xl overflow-hidden"
 							style={{
-								background: "var(--color-bg)",
-								borderColor: "var(--color-border)",
-								color: "var(--color-text)",
-							}}
-						/>
-						<button
-							type="submit"
-							disabled={
-								!input.trim() ||
-								isStreaming ||
-								loadingSession ||
-								startingNewSession
-							}
-							className={`${compact ? "px-3 py-2 text-xs rounded-lg" : "px-5 py-3 text-sm rounded-xl"} font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed`}
-							style={{
-								background: "var(--color-accent)",
-								color: "white",
+								background:
+									"var(--color-chat-input-bg)",
+								border: "1px solid var(--color-border)",
 							}}
 						>
-							{isStreaming ? (
-								<div
-									className={`${compact ? "w-3 h-3" : "w-5 h-5"} border-2 border-white/30 border-t-white rounded-full animate-spin`}
+							<form onSubmit={handleSubmit}>
+								<input
+									type="text"
+									value={input}
+									onChange={(e) =>
+										setInput(e.target.value)
+									}
+									placeholder={
+										compact && fileContext
+											? `Ask about ${fileContext.filename}...`
+											: "Ask anything..."
+									}
+									disabled={
+										isStreaming ||
+										loadingSession ||
+										startingNewSession
+									}
+									className={`w-full ${compact ? "px-3 py-2.5 text-xs" : "px-4 py-3.5 text-sm"} bg-transparent outline-none placeholder:text-[var(--color-text-muted)] disabled:opacity-50`}
+									style={{
+										color: "var(--color-text)",
+									}}
 								/>
-							) : (
-								"Send"
-							)}
-						</button>
-					</form>
+							</form>
+							{/* Toolbar row */}
+							<div
+								className={`flex items-center justify-between ${compact ? "px-2 pb-1.5" : "px-3 pb-2.5"}`}
+							>
+								<div className="flex items-center gap-0.5">
+									{/* Placeholder toolbar icons */}
+									<button
+										type="button"
+										className="p-1.5 rounded-lg"
+										style={{
+											color: "var(--color-text-muted)",
+										}}
+										title="Attach"
+									>
+										<svg
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+										>
+											<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+										</svg>
+									</button>
+								</div>
+								{/* Send button */}
+								<button
+									type="submit"
+									onClick={handleSubmit}
+									disabled={
+										!input.trim() ||
+										isStreaming ||
+										loadingSession ||
+										startingNewSession
+									}
+									className={`${compact ? "w-6 h-6" : "w-7 h-7"} rounded-full flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed`}
+									style={{
+										background:
+											input.trim()
+												? "var(--color-accent)"
+												: "var(--color-border-strong)",
+										color: "white",
+									}}
+								>
+									{isStreaming ? (
+										<div
+											className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"
+										/>
+									) : (
+										<svg
+											width="14"
+											height="14"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2.5"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+										>
+											<path d="M12 19V5" />
+											<path d="m5 12 7-7 7 7" />
+										</svg>
+									)}
+								</button>
+							</div>
+						</div>
+					</div>
 				</div>
 			</div>
 		);

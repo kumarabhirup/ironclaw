@@ -449,7 +449,7 @@ function DraggableNode({
         style={{
           paddingLeft: `${depth * 16 + 8}px`,
           background: showDropHighlight
-            ? "rgba(232, 93, 58, 0.12)"
+            ? "var(--color-accent-light)"
             : isSelected
               ? "var(--color-surface-hover)"
               : isActive
@@ -502,7 +502,7 @@ function DraggableNode({
         {/* Type badge for objects */}
         {node.type === "object" && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
-            style={{ background: "rgba(232, 93, 58, 0.15)", color: "var(--color-accent)" }}>
+            style={{ background: "var(--color-accent-light)", color: "var(--color-accent)" }}>
             {node.defaultView === "kanban" ? "board" : "table"}
           </span>
         )}
@@ -773,12 +773,12 @@ export function FileManagerTree({ tree, activePath, onSelect, onRefresh, compact
           break;
         }
         case "newFile": {
-          const parent = target.kind === "folder" ? target.path : target.kind === "file" ? parentPath(target.path) : "knowledge";
+          const parent = target.kind === "folder" ? target.path : target.kind === "file" ? parentPath(target.path) : "";
           setNewItemPrompt({ kind: "file", parentPath: parent });
           break;
         }
         case "newFolder": {
-          const parent = target.kind === "folder" ? target.path : target.kind === "file" ? parentPath(target.path) : "knowledge";
+          const parent = target.kind === "folder" ? target.path : target.kind === "file" ? parentPath(target.path) : "";
           setNewItemPrompt({ kind: "folder", parentPath: parent });
           break;
         }
@@ -938,7 +938,7 @@ export function FileManagerTree({ tree, activePath, onSelect, onRefresh, compact
                 ? curNode.type === "folder" || curNode.type === "object"
                   ? curNode.path
                   : parentPath(curNode.path)
-                : "knowledge";
+                : "";
               if (e.shiftKey) {
                 setNewItemPrompt({ kind: "folder", parentPath: parent });
               } else {

@@ -403,7 +403,7 @@ export function DatabaseViewer({ dbPath, filename }: DatabaseViewerProps) {
             onClick={() => setQueryMode(!queryMode)}
             className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-colors duration-100 cursor-pointer"
             style={{
-              background: queryMode ? "rgba(232, 93, 58, 0.15)" : "var(--color-surface-hover)",
+              background: queryMode ? "var(--color-accent-light)" : "var(--color-surface-hover)",
               color: queryMode ? "var(--color-accent)" : "var(--color-text-muted)",
               border: `1px solid ${queryMode ? "var(--color-accent)" : "var(--color-border)"}`,
             }}

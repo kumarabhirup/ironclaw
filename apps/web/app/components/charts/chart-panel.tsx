@@ -33,7 +33,7 @@ import type { PanelConfig } from "./types";
 // --- Color palette derived from CSS variables + accessible defaults ---
 
 const CHART_PALETTE = [
-  "#e85d3a", // accent
+  "#2563eb", // accent
   "#60a5fa", // blue
   "#22c55e", // green
   "#f59e0b", // amber
@@ -56,25 +56,25 @@ type ChartPanelProps = {
 
 const axisStyle = {
   fontSize: 11,
-  fill: "#888",
+  fill: "var(--color-text-muted)",
 };
 
 const gridStyle = {
-  stroke: "#262626",
+  stroke: "var(--color-border-strong)",
   strokeDasharray: "3 3",
 };
 
 function tooltipStyle() {
   return {
     contentStyle: {
-      background: "#141414",
-      border: "1px solid #262626",
+      background: "var(--color-surface)",
+      border: "1px solid var(--color-border)",
       borderRadius: 8,
       fontSize: 12,
-      color: "#ededed",
+      color: "var(--color-text)",
     },
-    itemStyle: { color: "#ededed" },
-    labelStyle: { color: "#888", marginBottom: 4 },
+    itemStyle: { color: "var(--color-text)" },
+    labelStyle: { color: "var(--color-text-muted)", marginBottom: 4 },
   };
 }
 
@@ -115,7 +115,7 @@ function CartesianChart({
   config: PanelConfig;
   data: Record<string, unknown>[];
   compact?: boolean;
-  ChartComponent: typeof BarChart | typeof LineChart | typeof AreaChart;
+  ChartComponent: typeof BarChart    ;
   SeriesComponent: typeof Bar | typeof Line | typeof Area;
   areaProps?: Record<string, unknown>;
 }) {
@@ -134,7 +134,7 @@ function CartesianChart({
           dataKey={xKey}
           tick={axisStyle}
           tickFormatter={formatLabel}
-          axisLine={{ stroke: "#262626" }}
+          axisLine={{ stroke: "var(--color-border)" }}
           tickLine={false}
         />
         <YAxis
@@ -245,9 +245,9 @@ function RadarChartPanel({
   return (
     <ResponsiveContainer width="100%" height={height}>
       <RadarChart data={data} cx="50%" cy="50%" outerRadius={compact ? 60 : 100}>
-        <PolarGrid stroke="#262626" />
-        <PolarAngleAxis dataKey={nameKey} tick={{ fontSize: 11, fill: "#888" }} />
-        <PolarRadiusAxis tick={{ fontSize: 10, fill: "#888" }} />
+        <PolarGrid stroke="var(--color-border)" />
+        <PolarAngleAxis dataKey={nameKey} tick={{ fontSize: 11, fill: "var(--color-text-muted)" }} />
+        <PolarRadiusAxis tick={{ fontSize: 10, fill: "var(--color-text-muted)" }} />
         {valueKeys.map((key, i) => (
           <Radar
             key={key}
@@ -285,7 +285,7 @@ function ScatterChartPanel({
     <ResponsiveContainer width="100%" height={height}>
       <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
         <CartesianGrid {...gridStyle} />
-        <XAxis dataKey={xKey} tick={axisStyle} name={xKey} axisLine={{ stroke: "#262626" }} tickLine={false} />
+        <XAxis dataKey={xKey} tick={axisStyle} name={xKey} axisLine={{ stroke: "var(--color-border)" }} tickLine={false} />
         <YAxis tick={axisStyle} tickFormatter={formatValue} axisLine={false} tickLine={false} width={48} />
         <Tooltip {...ttStyle} />
         {yKeys.map((key, i) => (
@@ -336,7 +336,7 @@ function FunnelChartPanel({
         >
           <LabelList
             position="right"
-            fill="#888"
+            fill="var(--color-text-muted)"
             stroke="none"
             fontSize={11}
             dataKey={nameKey}
