@@ -140,6 +140,20 @@ describe("argv helpers", () => {
     expect(fallbackArgv).toEqual(["node", "openclaw", "status"]);
   });
 
+  it("builds parse argv for ironclaw binary name", () => {
+    const directArgv = buildParseArgv({
+      programName: "ironclaw",
+      rawArgs: ["ironclaw", "status"],
+    });
+    expect(directArgv).toEqual(["node", "ironclaw", "status"]);
+
+    const nodeArgv = buildParseArgv({
+      programName: "ironclaw",
+      rawArgs: ["node", "ironclaw", "status"],
+    });
+    expect(nodeArgv).toEqual(["node", "ironclaw", "status"]);
+  });
+
   it("decides when to migrate state", () => {
     expect(shouldMigrateState(["node", "openclaw", "status"])).toBe(false);
     expect(shouldMigrateState(["node", "openclaw", "health"])).toBe(false);

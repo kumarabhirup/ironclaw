@@ -89,7 +89,7 @@ export async function ensureWebAppBuilt(
   try {
     await ensureDepsInstalled(webAppDir, log);
     runtime.log("Web app not built; building for production (next build)…");
-    await runCommand("npx", ["next", "build"], webAppDir, log);
+    await runCommand("node", [resolveNextBin(webAppDir), "build"], webAppDir, log);
   } catch (err) {
     return {
       ok: false,
@@ -147,7 +147,7 @@ export async function startWebAppIfEnabled(
     // Dev mode: ensure deps, then `next dev`.
     await ensureDepsInstalled(webAppDir, log);
     log.info(`starting web app (dev) on port ${port}…`);
-    child = spawn("npx", ["next", "dev", "--port", String(port)], {
+    child = spawn("node", [resolveNextBin(webAppDir), "dev", "--port", String(port)], {
       cwd: webAppDir,
       stdio: "pipe",
       env: { ...process.env, PORT: String(port) },
@@ -158,13 +158,13 @@ export async function startWebAppIfEnabled(
 
     if (!hasNextBuild(webAppDir)) {
       log.info("building web app for production (first run)…");
-      await runCommand("npx", ["next", "build"], webAppDir, log);
+      await runCommand("node", [resolveNextBin(webAppDir), "build"], webAppDir, log);
     } else {
       log.info("existing web app build found — skipping build");
     }
 
     log.info(`starting web app (production) on port ${port}…`);
-    child = spawn("npx", ["next", "start", "--port", String(port)], {
+    child = spawn("node", [resolveNextBin(webAppDir), "start", "--port", String(port)], {
       cwd: webAppDir,
       stdio: "pipe",
       env: { ...process.env, PORT: String(port) },
@@ -220,6 +220,18 @@ export async function startWebAppIfEnabled(
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the local `next` CLI entry script from apps/web/node_modules.
+ *
+ * Using `npx next` is fragile in global installs (pnpm, npm) because npx
+ * walks up the node_modules tree and may hit a broken pnpm virtual-store
+ * symlink in the parent package. Resolving the local binary directly avoids
+ * this issue entirely.
+ */
+function resolveNextBin(webAppDir: string): string {
+  return path.join(webAppDir, "node_modules", "next", "dist", "bin", "next");
+}
 
 async function ensureDepsInstalled(
   webAppDir: string,
