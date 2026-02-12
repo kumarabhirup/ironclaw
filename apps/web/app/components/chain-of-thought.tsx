@@ -178,7 +178,7 @@ function extractDomains(text: string): string[] {
 }
 
 function faviconUrl(domain: string): string {
-	return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`;
+	return `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(domain)}`;
 }
 
 /* ─── Classify tool steps ─── */
@@ -192,7 +192,10 @@ type StepKind =
 	| "image"
 	| "generic";
 
-function classifyTool(name: string): StepKind {
+function classifyTool(
+	name: string,
+	args?: Record<string, unknown>,
+): StepKind {
 	const n = name.toLowerCase().replace(/[_-]/g, "");
 	if (
 		[
@@ -205,6 +208,18 @@ function classifyTool(name: string): StepKind {
 		].some((k) => n.includes(k))
 	)
 		{return "search";}
+
+	// Browser tool — classify based on the action being performed
+	if (n === "browser") {
+		const action =
+			typeof args?.action === "string"
+				? args.action.toLowerCase()
+				: "";
+		if (action === "open" || action === "navigate") {return "fetch";}
+		if (action === "screenshot") {return "image";}
+		return "fetch"; // default: most browser actions involve a page
+	}
+
 	if (
 		["fetchurl", "fetch", "browse", "browseurl", "webfetch"].some(
 			(k) => n.includes(k),
@@ -278,12 +293,26 @@ function buildStepLabel(
 		}
 		case "fetch": {
 			const u =
-				strVal("url") ?? strVal("path") ?? strVal("src");
+				strVal("url") ??
+				strVal("targetUrl") ??
+				strVal("path") ??
+				strVal("src");
 			if (u) {
 				try {
 					return `Fetching ${new URL(u).hostname}`;
 				} catch {
 					return `Fetching ${u.length > 50 ? u.slice(0, 50) + "..." : u}`;
+				}
+			}
+			// Fallback: check output for the URL (web_fetch results include url/finalUrl)
+			const outUrl =
+				(typeof output?.finalUrl === "string" && output.finalUrl) ||
+				(typeof output?.url === "string" && output.url);
+			if (outUrl) {
+				try {
+					return `Fetched ${new URL(outUrl).hostname}`;
+				} catch {
+					return `Fetched ${outUrl.length > 50 ? outUrl.slice(0, 50) + "..." : outUrl}`;
 				}
 			}
 			return "Fetching page";
@@ -334,10 +363,13 @@ function getSearchDomains(
 	if (!output) {return [];}
 	const text = typeof output.text === "string" ? output.text : "";
 	const results = output.results;
+	const citations = output.citations;
 	let combined = text;
 	if (Array.isArray(results)) {
 		for (const r of results) {
-			if (typeof r === "object" && r !== null) {
+			if (typeof r === "string") {
+				combined += ` ${r}`;
+			} else if (typeof r === "object" && r !== null) {
 				const obj = r as Record<string, unknown>;
 				if (typeof obj.url === "string")
 					{combined += ` ${obj.url}`;}
@@ -346,7 +378,62 @@ function getSearchDomains(
 			}
 		}
 	}
+	if (Array.isArray(citations)) {
+		for (const c of citations) {
+			// Citations can be plain URL strings or objects with a url field
+			if (typeof c === "string") {
+				combined += ` ${c}`;
+			} else if (typeof c === "object" && c !== null) {
+				const obj = c as Record<string, unknown>;
+				if (typeof obj.url === "string")
+					{combined += ` ${obj.url}`;}
+			}
+		}
+	}
+	// Scan all remaining string values in the output for URLs we may have missed
+	for (const val of Object.values(output)) {
+		if (typeof val === "string" && val !== text && val.includes("http")) {
+			combined += ` ${val}`;
+		}
+	}
 	return extractDomains(combined);
+}
+
+/** Extract domain(s) from fetch/browser tool args and/or output */
+function getFetchDomains(
+	args?: Record<string, unknown>,
+	output?: Record<string, unknown>,
+): string[] {
+	const domains = new Set<string>();
+	// Check args for URL (web_fetch uses "url", browser tool uses "targetUrl")
+	for (const key of ["url", "targetUrl", "path", "src"]) {
+		const v = args?.[key];
+		if (typeof v === "string" && v.startsWith("http")) {
+			try {
+				const hostname = new URL(v).hostname;
+				if (hostname && !hostname.includes("localhost")) {
+					domains.add(hostname);
+				}
+			} catch {
+				/* skip */
+			}
+		}
+	}
+	// Check output for URL / finalUrl
+	for (const key of ["url", "finalUrl", "targetUrl"]) {
+		const v = output?.[key];
+		if (typeof v === "string" && v.startsWith("http")) {
+			try {
+				const hostname = new URL(v).hostname;
+				if (hostname && !hostname.includes("localhost")) {
+					domains.add(hostname);
+				}
+			} catch {
+				/* skip */
+			}
+		}
+	}
+	return [...domains].slice(0, 4);
 }
 
 /* ─── Group consecutive media reads ─── */
@@ -366,7 +453,7 @@ function groupToolSteps(tools: ToolPart[]): VisualItem[] {
 	let i = 0;
 	while (i < tools.length) {
 		const tool = tools[i];
-		const kind = classifyTool(tool.toolName);
+		const kind = classifyTool(tool.toolName, tool.args);
 		// Check both args AND output for the file path
 		const filePath = getFilePath(tool.args, tool.output);
 		const media = filePath ? detectMedia(filePath) : null;
@@ -379,7 +466,7 @@ function groupToolSteps(tools: ToolPart[]): VisualItem[] {
 			let j = i + 1;
 			while (j < tools.length) {
 				const next = tools[j];
-				const nextKind = classifyTool(next.toolName);
+				const nextKind = classifyTool(next.toolName, next.args);
 				const nextPath = getFilePath(next.args, next.output);
 				const nextMedia = nextPath ? detectMedia(nextPath) : null;
 				if (nextKind === "read" && nextMedia === media && nextPath) {
@@ -972,12 +1059,14 @@ function ToolStep({
 	errorText?: string;
 }) {
 	const [showOutput, setShowOutput] = useState(false);
-	const kind = classifyTool(toolName);
+	const kind = classifyTool(toolName, args);
 	const label = buildStepLabel(kind, toolName, args, output);
 	const domains =
-		(kind === "search" || kind === "fetch") && status === "done"
+		kind === "search"
 			? getSearchDomains(output)
-			: [];
+			: kind === "fetch"
+				? getFetchDomains(args, output)
+				: [];
 	const outputText =
 		typeof output?.text === "string" ? output.text : undefined;
 
@@ -1067,8 +1156,8 @@ function ToolStep({
 					/>
 				)}
 
-				{/* Search domain badges */}
-				{domains.length > 0 && (
+				{/* Domain badges (search results / fetched page) — skip when running, the running section handles its own */}
+				{domains.length > 0 && status !== "running" && (
 					<div className="flex items-center gap-1.5 flex-wrap mt-1.5">
 						{domains.map((domain) => (
 							<DomainBadge
@@ -1083,26 +1172,65 @@ function ToolStep({
 					status === "running" &&
 					args && (
 						<div className="flex items-center gap-1.5 flex-wrap mt-1.5">
-							<span
-								className="inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px]"
-								style={{
-									background:
-										"var(--color-surface-hover)",
-									color: "var(--color-text-muted)",
-									border: "1px solid var(--color-border)",
-								}}
-							>
-								<span
-									className="w-2 h-2 rounded-full animate-pulse"
-									style={{
-										background:
-											"var(--color-accent)",
-									}}
-								/>
-								{kind === "fetch"
-									? "Fetching..."
-									: "Searching..."}
-							</span>
+							{/* Show favicon badges for known domains while running */}
+							{domains.length > 0
+								? domains.map((domain) => (
+										<span
+											key={domain}
+											className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px]"
+											style={{
+												background:
+													"var(--color-surface-hover)",
+												color: "var(--color-text-secondary)",
+												border: "1px solid var(--color-border)",
+											}}
+										>
+											{/* eslint-disable-next-line @next/next/no-img-element */}
+											<img
+												src={faviconUrl(
+													domain,
+												)}
+												alt=""
+												width={14}
+												height={14}
+												className="rounded-sm flex-shrink-0"
+												loading="lazy"
+											/>
+											{domain.replace(
+												/^www\./,
+												"",
+											)}
+											<span
+												className="w-2 h-2 rounded-full animate-pulse"
+												style={{
+													background:
+														"var(--color-accent)",
+												}}
+											/>
+										</span>
+									))
+								: (
+										<span
+											className="inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px]"
+											style={{
+												background:
+													"var(--color-surface-hover)",
+												color: "var(--color-text-muted)",
+												border: "1px solid var(--color-border)",
+											}}
+										>
+											<span
+												className="w-2 h-2 rounded-full animate-pulse"
+												style={{
+													background:
+														"var(--color-accent)",
+												}}
+											/>
+											{kind === "fetch"
+												? "Fetching..."
+												: "Searching..."}
+										</span>
+									)}
 						</div>
 					)}
 
@@ -1177,8 +1305,8 @@ function DomainBadge({ domain }: { domain: string }) {
 			<img
 				src={faviconUrl(domain)}
 				alt=""
-				width={14}
-				height={14}
+				width={16}
+				height={16}
 				className="rounded-sm flex-shrink-0"
 				loading="lazy"
 			/>

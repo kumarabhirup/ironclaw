@@ -59,11 +59,18 @@ export type AgentCallback = {
  * Extract text content from the agent's tool result object.
  * The result has `content: Array<{ type: "text", text: string } | ...>` and
  * optional `details` (exit codes, file paths, etc.).
+ *
+ * Falls back gracefully when the result doesn't follow the standard wrapper:
+ * - If no `content` array, tries to use the raw object as details directly.
+ * - If the raw value is a string, treats it as text.
  */
-function extractToolResult(
+export function extractToolResult(
 	raw: unknown,
 ): ToolResult | undefined {
-	if (!raw || typeof raw !== "object") {return undefined;}
+	if (!raw) {return undefined;}
+	// String result — treat the whole thing as text
+	if (typeof raw === "string") {return { text: raw, details: undefined };}
+	if (typeof raw !== "object") {return undefined;}
 	const r = raw as Record<string, unknown>;
 
 	// Extract text from content blocks
@@ -86,6 +93,13 @@ function extractToolResult(
 			? (r.details as Record<string, unknown>)
 			: undefined;
 
+	// Fallback: if neither content nor details were found, the raw object
+	// might BE the tool payload itself (e.g. { query, results, url, ... }).
+	// Use it as details so buildToolOutput can extract web tool fields.
+	if (!text && !details && !Array.isArray(r.content)) {
+		return { text: undefined, details: r };
+	}
+
 	return { text, details };
 }
 
@@ -93,6 +107,88 @@ export type RunAgentOptions = {
 	/** When set, the agent runs in an isolated session (e.g. file-scoped subagent). */
 	sessionId?: string;
 };
+
+/**
+ * Spawn an agent child process and return the ChildProcess handle.
+ * Shared between `runAgent` (legacy callback API) and the ActiveRunManager.
+ */
+export function spawnAgentProcess(
+	message: string,
+	agentSessionId?: string,
+): ReturnType<typeof spawn> {
+	const cwd = process.cwd();
+	const root = cwd.endsWith(join("apps", "web"))
+		? join(cwd, "..", "..")
+		: cwd;
+
+	const scriptPath = join(root, "scripts", "run-node.mjs");
+
+	const args = [
+		scriptPath,
+		"agent",
+		"--agent",
+		"main",
+		"--message",
+		message,
+		"--stream-json",
+	];
+
+	if (agentSessionId) {
+		const sessionKey = `agent:main:subagent:${agentSessionId}`;
+		args.push("--session-key", sessionKey, "--lane", "subagent");
+	}
+
+	return spawn("node", args, {
+		cwd: root,
+		env: { ...process.env },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+/**
+ * Build a flat output object from the agent's tool result so the frontend
+ * can render tool output text, exit codes, etc.
+ */
+export function buildToolOutput(
+	result?: ToolResult,
+): Record<string, unknown> {
+	if (!result) {return {};}
+	const out: Record<string, unknown> = {};
+	if (result.text) {out.text = result.text;}
+	if (result.details) {
+		for (const key of [
+			"exitCode",
+			"status",
+			"durationMs",
+			"cwd",
+			"error",
+			"reason",
+			// Web tool fields — pass through so the UI can show favicons / domains
+			"url",
+			"finalUrl",
+			"targetUrl",
+			"query",
+			"results",
+			"citations",
+		]) {
+			if (result.details[key] !== undefined)
+				{out[key] = result.details[key];}
+		}
+	}
+	// If we have details but no text, synthesize a text field from the JSON so
+	// domain-extraction regex in the frontend can find URLs from search results.
+	if (!out.text && result.details) {
+		try {
+			const json = JSON.stringify(result.details);
+			if (json.length <= 12000) {
+				out.text = json;
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+	return out;
+}
 
 /**
  * Spawn the openclaw agent and stream its output.
@@ -108,50 +204,8 @@ export async function runAgent(
 	callback: AgentCallback,
 	options?: RunAgentOptions,
 ): Promise<void> {
-	// Get repo root - construct path dynamically at runtime
-	const cwd = process.cwd();
-	const root = cwd.endsWith(join("apps", "web"))
-		? join(cwd, "..", "..")
-		: cwd;
-
-	// Construct script path at runtime to avoid static analysis
-	const pathParts = ["scripts", "run-node.mjs"];
-	const scriptPath = join(root, ...pathParts);
-
 	return new Promise<void>((resolve) => {
-		const args = [
-			scriptPath,
-			"agent",
-			"--agent",
-			"main",
-			"--message",
-			message,
-			"--stream-json",
-			// Route through the gateway daemon (not --local) so all concurrent
-			// agent runs share the gateway's lane-based concurrency system.
-			// The gateway serialises writes per session-key and avoids the
-			// cross-process file-lock contention that --local causes when
-			// multiple chat threads run in parallel child processes.
-		];
-
-		// Isolated session for file-scoped subagent chats.
-		// Uses a proper subagent session key (agent:main:subagent:<id>) so the
-		// agent runs in the Subagent concurrency lane with its own session
-		// context, completely independent of the main agent session.
-		if (options?.sessionId) {
-			const sessionKey = `agent:main:subagent:${options.sessionId}`;
-			args.push("--session-key", sessionKey, "--lane", "subagent");
-		}
-
-		const child = spawn(
-			"node",
-			args,
-			{
-				cwd: root,
-				env: { ...process.env },
-				stdio: ["ignore", "pipe", "pipe"],
-			},
-		);
+		const child = spawnAgentProcess(message, options?.sessionId);
 
 		// Kill the child process if the caller aborts (e.g. user hit stop).
 		if (signal) {
@@ -170,7 +224,7 @@ export async function runAgent(
 		const stderrChunks: string[] = [];
 		let agentErrorReported = false;
 
-		const rl = createInterface({ input: child.stdout });
+		const rl = createInterface({ input: child.stdout! });
 
 		rl.on("line", (line: string) => {
 			if (!line.trim()) {return;}
@@ -353,7 +407,7 @@ export async function runAgent(
  * Handles various shapes: `{ error: "..." }`, `{ message: "..." }`,
  * `{ errorMessage: "402 {...}" }`, etc.
  */
-function parseAgentErrorMessage(
+export function parseAgentErrorMessage(
 	data: Record<string, unknown> | undefined,
 ): string | undefined {
 	if (!data) {return undefined;}
@@ -374,7 +428,7 @@ function parseAgentErrorMessage(
  * e.g. `402 {"error":{"message":"Insufficient funds..."}}`.
  * Returns a clean, user-readable message.
  */
-function parseErrorBody(raw: string): string {
+export function parseErrorBody(raw: string): string {
 	// Try to extract JSON body from "STATUS {json}" pattern
 	const jsonIdx = raw.indexOf("{");
 	if (jsonIdx >= 0) {
@@ -394,7 +448,7 @@ function parseErrorBody(raw: string): string {
  * Extract a meaningful error message from raw stderr output.
  * Strips ANSI codes and looks for common error patterns.
  */
-function parseErrorFromStderr(stderr: string): string | undefined {
+export function parseErrorFromStderr(stderr: string): string | undefined {
 	if (!stderr) {return undefined;}
 
 	// Strip ANSI escape codes

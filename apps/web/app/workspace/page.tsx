@@ -18,6 +18,9 @@ import { ChatPanel, type ChatPanelHandle } from "../components/chat-panel";
 import { EntryDetailModal } from "../components/workspace/entry-detail-modal";
 import { useSearchIndex } from "@/lib/search-index";
 import { parseWorkspaceLink, isWorkspaceLink } from "@/lib/workspace-links";
+import { CronDashboard } from "../components/cron/cron-dashboard";
+import { CronJobDetail } from "../components/cron/cron-job-detail";
+import type { CronJob, CronJobsResponse } from "../types/cron";
 
 // --- Types ---
 
@@ -82,7 +85,9 @@ type ContentState =
   | { kind: "media"; url: string; mediaType: MediaType; filename: string; filePath: string }
   | { kind: "database"; dbPath: string; filename: string }
   | { kind: "report"; reportPath: string; filename: string }
-  | { kind: "directory"; node: TreeNode };
+  | { kind: "directory"; node: TreeNode }
+  | { kind: "cron-dashboard" }
+  | { kind: "cron-job"; jobId: string; job: CronJob };
 
 type WebSession = {
   id: string;
@@ -208,15 +213,20 @@ function WorkspacePageInner() {
   const [sessions, setSessions] = useState<WebSession[]>([]);
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
 
+  // Cron jobs state
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+
   // Entry detail modal state
   const [entryModal, setEntryModal] = useState<{
     objectName: string;
     entryId: string;
   } | null>(null);
 
-  // Derive file context for chat sidebar directly from activePath (stable across loading)
+  // Derive file context for chat sidebar directly from activePath (stable across loading).
+  // Exclude reserved virtual paths (~chats, ~cron, etc.) where file-scoped chat is irrelevant.
   const fileContext = useMemo(() => {
     if (!activePath) {return undefined;}
+    if (isVirtualPath(activePath)) {return undefined;}
     const filename = activePath.split("/").pop() || activePath;
     return { path: activePath, filename };
   }, [activePath]);
@@ -268,6 +278,23 @@ function WorkspacePageInner() {
   const refreshSessions = useCallback(() => {
     setSidebarRefreshKey((k) => k + 1);
   }, []);
+
+  // Fetch cron jobs for sidebar
+  const fetchCronJobs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/cron/jobs");
+      const data: CronJobsResponse = await res.json();
+      setCronJobs(data.jobs ?? []);
+    } catch {
+      // ignore - cron might not be configured
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchCronJobs();
+    const id = setInterval(fetchCronJobs, 30_000);
+    return () => clearInterval(id);
+  }, [fetchCronJobs]);
 
   // Load content when path changes
   const loadContent = useCallback(
@@ -337,7 +364,7 @@ function WorkspacePageInner() {
         setContent({ kind: "none" });
         setActiveSessionId(sessionId);
         chatRef.current?.loadSession(sessionId);
-        router.replace("/workspace", { scroll: false });
+        // URL is synced by the activeSessionId effect
         return;
       }
       // Clicking the Chats folder itself opens a new chat
@@ -348,12 +375,30 @@ function WorkspacePageInner() {
         router.replace("/workspace", { scroll: false });
         return;
       }
+      // Intercept cron job item clicks
+      if (node.path.startsWith("~cron/")) {
+        const jobId = node.path.slice("~cron/".length);
+        const job = cronJobs.find((j) => j.id === jobId);
+        if (job) {
+          setActivePath(node.path);
+          setContent({ kind: "cron-job", jobId, job });
+          router.replace("/workspace", { scroll: false });
+          return;
+        }
+      }
+      // Clicking the Cron folder itself opens the dashboard
+      if (node.path === "~cron") {
+        setActivePath(node.path);
+        setContent({ kind: "cron-dashboard" });
+        router.replace("/workspace", { scroll: false });
+        return;
+      }
       loadContent(node);
     },
-    [loadContent, router],
+    [loadContent, router, cronJobs],
   );
 
-  // Build the enhanced tree: real tree + Chats virtual folder at the bottom
+  // Build the enhanced tree: real tree + Chats + Cron virtual folders at the bottom
   const enhancedTree = useMemo(() => {
     const chatChildren: TreeNode[] = sessions.map((s) => ({
       name: s.title || "Untitled chat",
@@ -370,21 +415,56 @@ function WorkspacePageInner() {
       children: chatChildren.length > 0 ? chatChildren : undefined,
     };
 
-    return [...tree, chatsFolder];
-  }, [tree, sessions]);
+    const cronStatusIcon = (job: CronJob) => {
+      if (!job.enabled) {return "\u25CB";} // circle outline
+      if (job.state.runningAtMs) {return "\u25CF";} // filled circle
+      if (job.state.lastStatus === "error") {return "\u25C6";} // diamond
+      if (job.state.lastStatus === "ok") {return "\u2713";} // check
+      return "\u25CB";
+    };
 
-  // Sync URL bar when activePath changes
+    const cronChildren: TreeNode[] = cronJobs.map((j) => ({
+      name: `${cronStatusIcon(j)} ${j.name}`,
+      path: `~cron/${j.id}`,
+      type: "file" as const,
+      virtual: true,
+    }));
+
+    const cronFolder: TreeNode = {
+      name: "Cron",
+      path: "~cron",
+      type: "folder",
+      virtual: true,
+      children: cronChildren.length > 0 ? cronChildren : undefined,
+    };
+
+    return [...tree, chatsFolder, cronFolder];
+  }, [tree, sessions, cronJobs]);
+
+  // Sync URL bar with active content / chat state.
+  // Uses window.location instead of searchParams in the comparison to
+  // avoid a circular dependency (searchParams updates → effect fires →
+  // router.replace → searchParams updates → …).
   useEffect(() => {
-    const currentPath = searchParams.get("path");
-    const currentEntry = searchParams.get("entry");
+    const current = new URLSearchParams(window.location.search);
 
-    if (activePath && activePath !== currentPath) {
-      const params = new URLSearchParams();
-      params.set("path", activePath);
-      if (currentEntry) {params.set("entry", currentEntry);}
-      router.replace(`/workspace?${params.toString()}`, { scroll: false });
+    if (activePath) {
+      // File / content mode — path takes priority over chat.
+      if (current.get("path") !== activePath || current.has("chat")) {
+        const params = new URLSearchParams();
+        params.set("path", activePath);
+        const entry = current.get("entry");
+        if (entry) {params.set("entry", entry);}
+        router.replace(`/workspace?${params.toString()}`, { scroll: false });
+      }
+    } else if (activeSessionId) {
+      // Chat mode — no file selected.
+      if (current.get("chat") !== activeSessionId || current.has("path")) {
+        router.replace(`/workspace?chat=${encodeURIComponent(activeSessionId)}`, { scroll: false });
+      }
     }
-  }, [activePath, searchParams, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally excludes searchParams to avoid infinite loop
+  }, [activePath, activeSessionId, router]);
 
   // Open entry modal handler
   const handleOpenEntry = useCallback(
@@ -406,12 +486,13 @@ function WorkspacePageInner() {
     router.replace(qs ? `/workspace?${qs}` : "/workspace", { scroll: false });
   }, [searchParams, router]);
 
-  // Auto-navigate to path from URL query param after tree loads
+  // Auto-navigate to path/chat from URL query params after tree loads
   useEffect(() => {
     if (initialPathHandled.current || treeLoading || tree.length === 0) {return;}
 
     const pathParam = searchParams.get("path");
     const entryParam = searchParams.get("entry");
+    const chatParam = searchParams.get("chat");
 
     if (pathParam) {
       const node = resolveNode(tree, pathParam);
@@ -419,6 +500,13 @@ function WorkspacePageInner() {
         initialPathHandled.current = true;
         loadContent(node);
       }
+    } else if (chatParam) {
+      // Restore the active chat session from URL
+      initialPathHandled.current = true;
+      setActiveSessionId(chatParam);
+      setActivePath(null);
+      setContent({ kind: "none" });
+      chatRef.current?.loadSession(chatParam);
     }
 
     // Also open entry modal from URL if present
@@ -529,6 +617,22 @@ function WorkspacePageInner() {
     [handleEditorNavigate],
   );
 
+  // Cron navigation handlers
+  const handleSelectCronJob = useCallback((jobId: string) => {
+    const job = cronJobs.find((j) => j.id === jobId);
+    if (job) {
+      setActivePath(`~cron/${jobId}`);
+      setContent({ kind: "cron-job", jobId, job });
+      router.replace("/workspace", { scroll: false });
+    }
+  }, [cronJobs, router]);
+
+  const handleBackToCronDashboard = useCallback(() => {
+    setActivePath("~cron");
+    setContent({ kind: "cron-dashboard" });
+    router.replace("/workspace", { scroll: false });
+  }, [router]);
+
   // Whether to show the main ChatPanel (no file/content selected)
   const showMainChat = !activePath || content.kind === "none";
 
@@ -574,21 +678,23 @@ function WorkspacePageInner() {
                   <path d="m12 19-7-7 7-7" /><path d="M19 12H5" />
                 </svg>
               </button>
-              {/* Chat sidebar toggle */}
-              <button
-                type="button"
-                onClick={() => setShowChatSidebar((v) => !v)}
-                className="p-1.5 rounded-lg flex-shrink-0"
-                style={{
-                  color: showChatSidebar ? "var(--color-accent)" : "var(--color-text-muted)",
-                  background: showChatSidebar ? "var(--color-accent-light)" : "transparent",
-                }}
-                title={showChatSidebar ? "Hide chat" : "Chat about this file"}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-              </button>
+              {/* Chat sidebar toggle (hidden for reserved/virtual paths and directories) */}
+              {fileContext && content.kind !== "directory" && (
+                <button
+                  type="button"
+                  onClick={() => setShowChatSidebar((v) => !v)}
+                  className="p-1.5 rounded-lg flex-shrink-0"
+                  style={{
+                    color: showChatSidebar ? "var(--color-accent)" : "var(--color-text-muted)",
+                    background: showChatSidebar ? "var(--color-accent-light)" : "transparent",
+                  }}
+                  title={showChatSidebar ? "Hide chat" : "Chat about this file"}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -623,11 +729,13 @@ function WorkspacePageInner() {
                   onNavigate={handleEditorNavigate}
                   onOpenEntry={handleOpenEntry}
                   searchFn={searchIndex}
+                  onSelectCronJob={handleSelectCronJob}
+                  onBackToCronDashboard={handleBackToCronDashboard}
                 />
               </div>
 
-              {/* Chat sidebar (file-scoped) */}
-              {fileContext && showChatSidebar && (
+              {/* Chat sidebar (file-scoped) — hidden for directories and reserved paths */}
+              {fileContext && showChatSidebar && content.kind !== "directory" && (
                 <aside
                   className="flex-shrink-0 border-l"
                   style={{
@@ -682,6 +790,8 @@ function ContentRenderer({
   onNavigate,
   onOpenEntry,
   searchFn,
+  onSelectCronJob,
+  onBackToCronDashboard,
 }: {
   content: ContentState;
   workspaceExists: boolean;
@@ -695,6 +805,8 @@ function ContentRenderer({
   onNavigate: (href: string) => void;
   onOpenEntry: (objectName: string, entryId: string) => void;
   searchFn: (query: string, limit?: number) => import("@/lib/search-index").SearchIndexItem[];
+  onSelectCronJob: (jobId: string) => void;
+  onBackToCronDashboard: () => void;
 }) {
   switch (content.kind) {
     case "loading":
@@ -773,6 +885,21 @@ function ContentRenderer({
         <DirectoryListing
           node={content.node}
           onNodeSelect={onNodeSelect}
+        />
+      );
+
+    case "cron-dashboard":
+      return (
+        <CronDashboard
+          onSelectJob={onSelectCronJob}
+        />
+      );
+
+    case "cron-job":
+      return (
+        <CronJobDetail
+          job={content.job}
+          onBack={onBackToCronDashboard}
         />
       );
 

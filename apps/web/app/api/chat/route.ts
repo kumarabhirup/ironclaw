@@ -1,6 +1,12 @@
 import type { UIMessage } from "ai";
-import { runAgent, type ToolResult } from "@/lib/agent-runner";
 import { resolveAgentWorkspacePrefix } from "@/lib/workspace";
+import {
+	startRun,
+	hasActiveRun,
+	subscribeToRun,
+	persistUserMessage,
+	type SseEvent,
+} from "@/lib/active-runs";
 
 // Force Node.js runtime (required for child_process)
 export const runtime = "nodejs";
@@ -8,43 +14,19 @@ export const runtime = "nodejs";
 // Allow streaming responses up to 10 minutes
 export const maxDuration = 600;
 
-/**
- * Build a flat output object from the agent's tool result so the frontend
- * can render tool output text, exit codes, etc.
- */
-function buildToolOutput(
-	result?: ToolResult,
-): Record<string, unknown> {
-	if (!result) {return {};}
-	const out: Record<string, unknown> = {};
-	if (result.text) {out.text = result.text;}
-	if (result.details) {
-		// Forward useful details (exit code, duration, status, cwd)
-		for (const key of [
-			"exitCode",
-			"status",
-			"durationMs",
-			"cwd",
-			"error",
-			"reason",
-		]) {
-			if (result.details[key] !== undefined)
-				{out[key] = result.details[key];}
-		}
-	}
-	return out;
-}
-
 export async function POST(req: Request) {
-	const { messages, sessionId }: { messages: UIMessage[]; sessionId?: string } =
-		await req.json();
+	const {
+		messages,
+		sessionId,
+	}: { messages: UIMessage[]; sessionId?: string } = await req.json();
 
 	// Extract the latest user message text
 	const lastUserMessage = messages.filter((m) => m.role === "user").pop();
 	const userText =
 		lastUserMessage?.parts
 			?.filter(
-				(p): p is { type: "text"; text: string } => p.type === "text",
+				(p): p is { type: "text"; text: string } =>
+					p.type === "text",
 			)
 			.map((p) => p.text)
 			.join("\n") ?? "";
@@ -53,9 +35,12 @@ export async function POST(req: Request) {
 		return new Response("No message provided", { status: 400 });
 	}
 
+	// Reject if a run is already active for this session.
+	if (sessionId && hasActiveRun(sessionId)) {
+		return new Response("Active run in progress", { status: 409 });
+	}
+
 	// Resolve workspace file paths to be agent-cwd-relative.
-	// Tree paths are workspace-root-relative (e.g. "knowledge/leads/foo.md"),
-	// but the agent runs from the repo root and needs "dench/knowledge/leads/foo.md".
 	let agentMessage = userText;
 	const wsPrefix = resolveAgentWorkspacePrefix();
 	if (wsPrefix) {
@@ -65,295 +50,84 @@ export async function POST(req: Request) {
 		);
 	}
 
-	// Create a custom SSE stream using the AI SDK v6 data stream wire format.
-	// DefaultChatTransport parses these events into UIMessage parts automatically.
+	// Persist the user message server-side so it survives a page reload
+	// even if the client never gets a chance to save.
+	if (sessionId && lastUserMessage) {
+		persistUserMessage(sessionId, {
+			id: lastUserMessage.id,
+			content: userText,
+			parts: lastUserMessage.parts as unknown[],
+		});
+	}
+
+	// Start the agent run (decoupled from this HTTP connection).
+	// The child process will keep running even if this response is cancelled.
+	if (sessionId) {
+		try {
+			startRun({
+				sessionId,
+				message: agentMessage,
+				agentSessionId: sessionId,
+			});
+		} catch (err) {
+			return new Response(
+				err instanceof Error ? err.message : String(err),
+				{ status: 500 },
+			);
+		}
+	}
+
+	// Stream SSE events to the client using the AI SDK v6 wire format.
 	const encoder = new TextEncoder();
 	let closed = false;
-	const abortController = new AbortController();
+	let unsubscribe: (() => void) | null = null;
+
 	const stream = new ReadableStream({
-		async start(controller) {
-			// Use incrementing IDs so multi-round reasoning/text cycles get
-			// unique part IDs (avoids conflicts in the AI SDK transport).
-			let idCounter = 0;
-			const nextId = (prefix: string) =>
-				`${prefix}-${Date.now()}-${++idCounter}`;
+		start(controller) {
+			if (!sessionId) {
+				// No session — shouldn't happen but close gracefully.
+				controller.close();
+				return;
+			}
 
-			let currentTextId = "";
-			let currentReasoningId = "";
-			let textStarted = false;
-			let reasoningStarted = false;
-			// Track whether ANY text was ever sent across the full run.
-			// onLifecycleEnd closes the text part (textStarted→false), so
-			// onClose can't rely on textStarted alone to detect "no output".
-			let everSentText = false;
-			// Track whether the status reasoning block is the one currently open
-			// so we can close it cleanly when real content arrives.
-			let statusReasoningActive = false;
-
-			/** Write an SSE event; silently no-ops if the stream was already cancelled. */
-			const writeEvent = (data: unknown) => {
-				if (closed) {return;}
-				const json = JSON.stringify(data);
-				controller.enqueue(encoder.encode(`data: ${json}\n\n`));
-			};
-
-			/** Close the reasoning part if open. */
-			const closeReasoning = () => {
-				if (reasoningStarted) {
-					writeEvent({
-						type: "reasoning-end",
-						id: currentReasoningId,
-					});
-					reasoningStarted = false;
-					statusReasoningActive = false;
-				}
-			};
-
-			/** Close the text part if open. */
-			const closeText = () => {
-				if (textStarted) {
-					writeEvent({ type: "text-end", id: currentTextId });
-					textStarted = false;
-				}
-			};
-
-			/** Open a status reasoning block (auto-closes any existing one). */
-			const openStatusReasoning = (label: string) => {
-				closeReasoning();
-				closeText();
-				currentReasoningId = nextId("status");
-				writeEvent({
-					type: "reasoning-start",
-					id: currentReasoningId,
-				});
-				writeEvent({
-					type: "reasoning-delta",
-					id: currentReasoningId,
-					delta: label,
-				});
-				reasoningStarted = true;
-				statusReasoningActive = true;
-			};
-
-			try {
-				await runAgent(agentMessage, abortController.signal, {
-					onLifecycleStart: () => {
-						// Show immediate feedback — the agent has started working.
-						// This eliminates the "Streaming... (silence)" gap.
-						openStatusReasoning("Preparing response...");
-					},
-
-					onThinkingDelta: (delta) => {
-						// Close the status block if it's still the active one;
-						// real reasoning content is now arriving.
-						if (statusReasoningActive) {
-							closeReasoning();
+			unsubscribe = subscribeToRun(
+				sessionId,
+				(event: SseEvent | null) => {
+					if (closed) {return;}
+					if (event === null) {
+						// Run completed — close the SSE stream.
+						closed = true;
+						try {
+							controller.close();
+						} catch {
+							/* already closed */
 						}
-						if (!reasoningStarted) {
-							currentReasoningId = nextId("reasoning");
-							writeEvent({
-								type: "reasoning-start",
-								id: currentReasoningId,
-							});
-							reasoningStarted = true;
-						}
-						writeEvent({
-							type: "reasoning-delta",
-							id: currentReasoningId,
-							delta,
-						});
-					},
+						return;
+					}
+					try {
+						const json = JSON.stringify(event);
+						controller.enqueue(
+							encoder.encode(`data: ${json}\n\n`),
+						);
+					} catch {
+						/* ignore enqueue errors on closed stream */
+					}
+				},
+				// Don't replay — we just created the run, the buffer is empty.
+				{ replay: false },
+			);
 
-					onTextDelta: (delta) => {
-						// Close reasoning once text starts streaming
-						closeReasoning();
-
-						if (!textStarted) {
-							currentTextId = nextId("text");
-							writeEvent({
-								type: "text-start",
-								id: currentTextId,
-							});
-							textStarted = true;
-						}
-						everSentText = true;
-						writeEvent({
-							type: "text-delta",
-							id: currentTextId,
-							delta,
-						});
-					},
-
-					onToolStart: (toolCallId, toolName, args) => {
-						// Close open reasoning/text parts before tool events
-						closeReasoning();
-						closeText();
-
-						writeEvent({
-							type: "tool-input-start",
-							toolCallId,
-							toolName,
-						});
-						// Include actual tool arguments so the frontend can
-						// display what the tool is doing (command, path, etc.)
-						writeEvent({
-							type: "tool-input-available",
-							toolCallId,
-							toolName,
-							input: args ?? {},
-						});
-					},
-
-					onToolEnd: (
-						toolCallId,
-						_toolName,
-						isError,
-						result,
-					) => {
-						if (isError) {
-							const errorText =
-								result?.text ||
-								(result?.details?.error as
-									| string
-									| undefined) ||
-								"Tool execution failed";
-							writeEvent({
-								type: "tool-output-error",
-								toolCallId,
-								errorText,
-							});
-						} else {
-							// Include the actual tool output (text, exit code, etc.)
-							writeEvent({
-								type: "tool-output-available",
-								toolCallId,
-								output: buildToolOutput(result),
-							});
-						}
-					},
-
-					onCompactionStart: () => {
-						// Show compaction status while the gateway is
-						// optimizing the session context (can take 10-30s).
-						openStatusReasoning("Optimizing session context...");
-					},
-
-					onCompactionEnd: (willRetry) => {
-						// Close the compaction status block. If the gateway
-						// will retry the prompt, leave the reasoning area open
-						// so the next status/thinking block follows smoothly.
-						if (statusReasoningActive) {
-							if (willRetry) {
-								// Append a note, keep block open for retry
-								writeEvent({
-									type: "reasoning-delta",
-									id: currentReasoningId,
-									delta: "\nRetrying with compacted context...",
-								});
-							} else {
-								closeReasoning();
-							}
-						}
-					},
-
-					onLifecycleEnd: () => {
-						closeReasoning();
-						closeText();
-					},
-
-					onAgentError: (message) => {
-						// Surface agent-level errors (API 402, rate limits, etc.)
-						// as visible text in the chat so the user sees what happened.
-						closeReasoning();
-						closeText();
-
-						currentTextId = nextId("text");
-						writeEvent({
-							type: "text-start",
-							id: currentTextId,
-						});
-						writeEvent({
-							type: "text-delta",
-							id: currentTextId,
-							delta: `[error] ${message}`,
-						});
-						writeEvent({
-							type: "text-end",
-							id: currentTextId,
-						});
-						textStarted = false;
-						everSentText = true;
-					},
-
-					onError: (err) => {
-						console.error("[chat] Agent error:", err);
-						closeReasoning();
-						closeText();
-
-						currentTextId = nextId("text");
-						writeEvent({
-							type: "text-start",
-							id: currentTextId,
-						});
-						textStarted = true;
-						everSentText = true;
-						writeEvent({
-							type: "text-delta",
-							id: currentTextId,
-							delta: `[error] Failed to start agent: ${err.message}`,
-						});
-						writeEvent({ type: "text-end", id: currentTextId });
-						textStarted = false;
-					},
-
-					onClose: (_code) => {
-						closeReasoning();
-						if (!everSentText) {
-							// No text was ever sent during the entire run
-							currentTextId = nextId("text");
-							writeEvent({
-								type: "text-start",
-								id: currentTextId,
-							});
-							const msg =
-								_code !== null && _code !== 0
-									? `[error] Agent exited with code ${_code}. Check server logs for details.`
-									: "[error] No response from agent.";
-							writeEvent({
-								type: "text-delta",
-								id: currentTextId,
-								delta: msg,
-							});
-							writeEvent({
-								type: "text-end",
-								id: currentTextId,
-							});
-						} else {
-							// Ensure any still-open text part is closed
-							closeText();
-						}
-					},
-				}, sessionId ? { sessionId } : undefined);
-			} catch (error) {
-				console.error("[chat] Stream error:", error);
-				writeEvent({
-					type: "error",
-					errorText:
-						error instanceof Error
-							? error.message
-							: String(error),
-				});
-			} finally {
-				if (!closed) {
-					closed = true;
-					controller.close();
-				}
+			if (!unsubscribe) {
+				// Race: run was cleaned up between startRun and subscribe.
+				closed = true;
+				controller.close();
 			}
 		},
 		cancel() {
-			// Client disconnected (e.g. user hit stop) — tear down gracefully.
+			// Client disconnected — unsubscribe but keep the run alive.
+			// The ActiveRunManager continues buffering + persisting in the background.
 			closed = true;
-			abortController.abort();
+			unsubscribe?.();
 		},
 	});
 

@@ -13,6 +13,139 @@ import {
 } from "react";
 import { ChatMessage } from "./chat-message";
 
+// ── SSE stream parser for reconnection ──
+// Converts raw SSE events (AI SDK v6 wire format) into UIMessage parts.
+
+type ParsedPart =
+	| { type: "text"; text: string }
+	| { type: "reasoning"; text: string; state?: string }
+	| {
+			type: "dynamic-tool";
+			toolName: string;
+			toolCallId: string;
+			state: string;
+			input?: Record<string, unknown>;
+			output?: Record<string, unknown>;
+		};
+
+function createStreamParser() {
+	const parts: ParsedPart[] = [];
+	let currentTextIdx = -1;
+	let currentReasoningIdx = -1;
+
+	function processEvent(event: Record<string, unknown>) {
+		const t = event.type as string;
+
+		switch (t) {
+			case "reasoning-start":
+				parts.push({
+					type: "reasoning",
+					text: "",
+					state: "streaming",
+				});
+				currentReasoningIdx = parts.length - 1;
+				break;
+			case "reasoning-delta": {
+				if (currentReasoningIdx >= 0) {
+					const p = parts[currentReasoningIdx] as {
+						type: "reasoning";
+						text: string;
+					};
+					p.text += event.delta as string;
+				}
+				break;
+			}
+			case "reasoning-end":
+				if (currentReasoningIdx >= 0) {
+					const p = parts[currentReasoningIdx] as {
+						type: "reasoning";
+						state?: string;
+					};
+					delete p.state;
+				}
+				currentReasoningIdx = -1;
+				break;
+			case "text-start":
+				parts.push({ type: "text", text: "" });
+				currentTextIdx = parts.length - 1;
+				break;
+			case "text-delta": {
+				if (currentTextIdx >= 0) {
+					const p = parts[currentTextIdx] as {
+						type: "text";
+						text: string;
+					};
+					p.text += event.delta as string;
+				}
+				break;
+			}
+			case "text-end":
+				currentTextIdx = -1;
+				break;
+			case "tool-input-start":
+				parts.push({
+					type: "dynamic-tool",
+					toolCallId: event.toolCallId as string,
+					toolName: event.toolName as string,
+					state: "input-available",
+					input: {},
+				});
+				break;
+			case "tool-input-available":
+				for (let i = parts.length - 1; i >= 0; i--) {
+					const p = parts[i];
+					if (
+						p.type === "dynamic-tool" &&
+						p.toolCallId === event.toolCallId
+					) {
+						p.input =
+							(event.input as Record<string, unknown>) ??
+							{};
+						break;
+					}
+				}
+				break;
+			case "tool-output-available":
+				for (let i = parts.length - 1; i >= 0; i--) {
+					const p = parts[i];
+					if (
+						p.type === "dynamic-tool" &&
+						p.toolCallId === event.toolCallId
+					) {
+						p.state = "output-available";
+						p.output =
+							(event.output as Record<
+								string,
+								unknown
+							>) ?? {};
+						break;
+					}
+				}
+				break;
+			case "tool-output-error":
+				for (let i = parts.length - 1; i >= 0; i--) {
+					const p = parts[i];
+					if (
+						p.type === "dynamic-tool" &&
+						p.toolCallId === event.toolCallId
+					) {
+						p.state = "error";
+						p.output = {
+							error: event.errorText as string,
+						};
+						break;
+					}
+				}
+				break;
+		}
+	}
+
+	return {
+		processEvent,
+		getParts: (): ParsedPart[] => parts.map((p) => ({ ...p })),
+	};
+}
+
 /** Imperative handle for parent-driven session control (main page). */
 export type ChatPanelHandle = {
 	loadSession: (sessionId: string) => Promise<void>;
@@ -64,6 +197,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		const [startingNewSession, setStartingNewSession] = useState(false);
 		const messagesEndRef = useRef<HTMLDivElement>(null);
 
+		// ── Reconnection state ──
+		const [isReconnecting, setIsReconnecting] = useState(false);
+		const reconnectAbortRef = useRef<AbortController | null>(null);
+
 		// Track persisted messages to avoid double-saves
 		const savedMessageIdsRef = useRef<Set<string>>(new Set());
 		// Set when /new or + triggers a new session
@@ -101,7 +238,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			useChat({ transport });
 
 		const isStreaming =
-			status === "streaming" || status === "submitted";
+			status === "streaming" ||
+			status === "submitted" ||
+			isReconnecting;
 
 		// Auto-scroll to bottom on new messages
 		useEffect(() => {
@@ -129,67 +268,119 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			[filePath],
 		);
 
-		const saveMessages = useCallback(
+		// ── Stream reconnection ──
+		// Attempts to reconnect to an active agent run for the given session.
+		// Replays buffered SSE events and streams live updates.
+		const attemptReconnect = useCallback(
 			async (
 				sessionId: string,
-				msgs: Array<{
+				baseMessages: Array<{
 					id: string;
-					role: string;
-					content: string;
-					parts?: unknown[];
+					role: "user" | "assistant" | "system";
+					parts: UIMessage["parts"];
 				}>,
-				title?: string,
-			) => {
-				const toSave = msgs.map((m) => ({
-					id: m.id,
-					role: m.role,
-					content: m.content,
-					...(m.parts ? { parts: m.parts } : {}),
-					timestamp: new Date().toISOString(),
-				}));
+			): Promise<boolean> => {
+				const abort = new AbortController();
+				reconnectAbortRef.current = abort;
+
 				try {
-					await fetch(
-						`/api/web-sessions/${sessionId}/messages`,
-						{
-							method: "POST",
-							headers: {
-								"Content-Type": "application/json",
-							},
-							body: JSON.stringify({
-								messages: toSave,
-								title,
-							}),
-						},
+					const res = await fetch(
+						`/api/chat/stream?sessionId=${encodeURIComponent(sessionId)}`,
+						{ signal: abort.signal },
 					);
-					for (const m of msgs) {
+					if (!res.ok || !res.body) {
+						return false; // No active run
+					}
+
+					setIsReconnecting(true);
+
+					const parser = createStreamParser();
+					const reader = res.body.getReader();
+					const decoder = new TextDecoder();
+					const reconnectMsgId = `reconnect-${sessionId}`;
+					let buffer = "";
+					let frameRequested = false;
+
+					const updateUI = () => {
+						const assistantMsg = {
+							id: reconnectMsgId,
+							role: "assistant" as const,
+							parts: parser.getParts() as UIMessage["parts"],
+						};
+						setMessages([
+							...baseMessages,
+							assistantMsg,
+						]);
+					};
+
+					// Read the SSE stream
+					// eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- loop reads until done
+					while (true) {
+						const { done, value } =
+							await reader.read();
+						if (done) {break;}
+
+						buffer += decoder.decode(value, {
+							stream: true,
+						});
+
+						// Parse SSE events (data: <json>\n\n)
+						let idx;
+						while (
+							(idx = buffer.indexOf("\n\n")) !== -1
+						) {
+							const chunk = buffer.slice(0, idx);
+							buffer = buffer.slice(idx + 2);
+
+							if (chunk.startsWith("data: ")) {
+								try {
+									const event = JSON.parse(
+										chunk.slice(6),
+									);
+									parser.processEvent(event);
+								} catch {
+									/* skip malformed events */
+								}
+							}
+						}
+
+						// Batch UI updates to animation frames
+						if (!frameRequested) {
+							frameRequested = true;
+							requestAnimationFrame(() => {
+								frameRequested = false;
+								updateUI();
+							});
+						}
+					}
+
+					// Final update after stream ends
+					updateUI();
+
+					// Mark all messages as saved (server persisted them)
+					for (const m of baseMessages) {
 						savedMessageIdsRef.current.add(m.id);
 					}
-					onSessionsChange?.();
+					savedMessageIdsRef.current.add(reconnectMsgId);
+
+					setIsReconnecting(false);
+					reconnectAbortRef.current = null;
+					return true;
 				} catch (err) {
-					console.error("Failed to save messages:", err);
+					if (
+						(err as Error).name !== "AbortError"
+					) {
+						console.error(
+							"Reconnection error:",
+							err,
+						);
+					}
+					setIsReconnecting(false);
+					reconnectAbortRef.current = null;
+					return false;
 				}
 			},
-			[onSessionsChange],
-		);
-
-		/** Extract plain text from a UIMessage */
-		const getMessageText = useCallback(
-			(msg: (typeof messages)[number]): string => {
-				return (
-					msg.parts
-						?.filter(
-							(
-								p,
-							): p is {
-								type: "text";
-								text: string;
-							} => p.type === "text",
-						)
-						.map((p) => p.text)
-						.join("\n") ?? ""
-				);
-			},
-			[],
+			[setMessages],
 		);
 
 		// ── File-scoped session initialization ──
@@ -253,9 +444,21 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 							role: "user" | "assistant";
 							content: string;
 							parts?: Array<Record<string, unknown>>;
+							_streaming?: boolean;
 						}> = msgData.messages || [];
 
-						const uiMessages = sessionMessages.map(
+						// Filter out in-progress streaming messages
+						// (will be rebuilt from the live SSE stream)
+						const hasStreaming = sessionMessages.some(
+							(m) => m._streaming,
+						);
+						const completedMessages = hasStreaming
+							? sessionMessages.filter(
+									(m) => !m._streaming,
+								)
+							: sessionMessages;
+
+						const uiMessages = completedMessages.map(
 							(msg) => {
 								savedMessageIdsRef.current.add(msg.id);
 								return {
@@ -273,6 +476,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 						if (!cancelled) {
 							setMessages(uiMessages);
 						}
+
+						// If there was a streaming message, try to
+						// reconnect to the active agent run.
+						if (hasStreaming && !cancelled) {
+							await attemptReconnect(
+								latest.id,
+								uiMessages,
+							);
+						}
 					} catch {
 						// ignore
 					}
@@ -283,9 +495,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				cancelled = true;
 			};
 			// eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters
-		}, [filePath]);
+		}, [filePath, attemptReconnect]);
 
-		// ── Persist unsaved messages + live-reload after streaming ──
+		// ── Post-stream side-effects (file-reload, session refresh) ──
+		// Message persistence is handled server-side by ActiveRunManager,
+		// so we only refresh the file sessions list and notify the parent
+		// when the file content may have changed.
 		const prevStatusRef = useRef(status);
 		useEffect(() => {
 			const wasStreaming =
@@ -294,17 +509,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			const isNowReady = status === "ready";
 
 			if (wasStreaming && isNowReady && currentSessionId) {
-				const unsaved = messages.filter(
-					(m) => !savedMessageIdsRef.current.has(m.id),
-				);
-				if (unsaved.length > 0) {
-					const toSave = unsaved.map((m) => ({
-						id: m.id,
-						role: m.role,
-						content: getMessageText(m),
-						parts: m.parts,
-					}));
-					saveMessages(currentSessionId, toSave);
+				// Mark all current messages as saved — the server
+				// already persisted them via ActiveRunManager.
+				for (const m of messages) {
+					savedMessageIdsRef.current.add(m.id);
 				}
 
 				if (filePath) {
@@ -327,16 +535,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 						})
 						.catch(() => {});
 				}
+
+				onSessionsChange?.();
 			}
 			prevStatusRef.current = status;
 		}, [
 			status,
 			messages,
 			currentSessionId,
-			saveMessages,
-			getMessageText,
 			filePath,
 			onFileChanged,
+			onSessionsChange,
 		]);
 
 		// ── Actions ──
@@ -391,7 +600,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 					return;
 				}
 
+				// Stop any active stream/reconnection for the old session.
+				reconnectAbortRef.current?.abort();
 				stop();
+
 				setLoadingSession(true);
 				setCurrentSessionId(sessionId);
 				sessionIdRef.current = sessionId;
@@ -413,23 +625,43 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 						role: "user" | "assistant";
 						content: string;
 						parts?: Array<Record<string, unknown>>;
+						_streaming?: boolean;
 					}> = data.messages || [];
 
-					const uiMessages = sessionMessages.map((msg) => {
-						savedMessageIdsRef.current.add(msg.id);
-						return {
-							id: msg.id,
-							role: msg.role,
-							parts: (msg.parts ?? [
-								{
-									type: "text" as const,
-									text: msg.content,
-								},
-							]) as UIMessage["parts"],
-						};
-					});
+					const hasStreaming = sessionMessages.some(
+						(m) => m._streaming,
+					);
+					const completedMessages = hasStreaming
+						? sessionMessages.filter(
+								(m) => !m._streaming,
+							)
+						: sessionMessages;
+
+					const uiMessages = completedMessages.map(
+						(msg) => {
+							savedMessageIdsRef.current.add(msg.id);
+							return {
+								id: msg.id,
+								role: msg.role,
+								parts: (msg.parts ?? [
+									{
+										type: "text" as const,
+										text: msg.content,
+									},
+								]) as UIMessage["parts"],
+							};
+						},
+					);
 
 					setMessages(uiMessages);
+
+					// Reconnect to active stream if one exists.
+					if (hasStreaming) {
+						await attemptReconnect(
+							sessionId,
+							uiMessages,
+						);
+					}
 				} catch (err) {
 					console.error("Error loading session:", err);
 				} finally {
@@ -441,11 +673,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				setMessages,
 				onActiveSessionChange,
 				stop,
+				attemptReconnect,
 			],
 		);
 
 		const handleNewSession = useCallback(async () => {
+			reconnectAbortRef.current?.abort();
 			stop();
+			setIsReconnecting(false);
 			setCurrentSessionId(null);
 			sessionIdRef.current = null;
 			onActiveSessionChange?.(null);
@@ -477,21 +712,46 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			[handleSessionSelect, handleNewSession],
 		);
 
+		// ── Stop handler (aborts server-side run + client-side stream) ──
+		const handleStop = useCallback(async () => {
+			// Abort the server-side agent run
+			if (currentSessionId) {
+				fetch("/api/chat/stop", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({
+						sessionId: currentSessionId,
+					}),
+				}).catch(() => {});
+			}
+
+			// Abort reconnection stream if active
+			reconnectAbortRef.current?.abort();
+			setIsReconnecting(false);
+
+			// Stop the useChat transport stream
+			stop();
+		}, [currentSessionId, stop]);
+
 		// ── Status label ──
 
 		const statusLabel = startingNewSession
 			? "Starting new session..."
 			: loadingSession
 				? "Loading session..."
-				: status === "ready"
-					? "Ready"
-					: status === "submitted"
-						? "Thinking..."
-						: status === "streaming"
-							? "Streaming..."
-							: status === "error"
-								? "Error"
-								: status;
+				: isReconnecting
+					? "Resuming stream..."
+					: status === "ready"
+						? "Ready"
+						: status === "submitted"
+							? "Thinking..."
+							: status === "streaming"
+								? "Streaming..."
+								: status === "error"
+									? "Error"
+									: status;
 
 		// ── Render ──
 
@@ -577,7 +837,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 						{isStreaming && (
 							<button
 								type="button"
-								onClick={() => stop()}
+								onClick={() => handleStop()}
 								className={`${compact ? "px-2 py-0.5 text-[10px]" : "px-3 py-1 text-xs"} rounded-full font-medium`}
 								style={{
 									background:

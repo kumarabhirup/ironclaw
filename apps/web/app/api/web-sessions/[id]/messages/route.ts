@@ -1,5 +1,4 @@
 import {
-  appendFileSync,
   readFileSync,
   writeFileSync,
   existsSync,
@@ -21,7 +20,14 @@ type IndexEntry = {
   messageCount: number;
 };
 
-/** POST /api/web-sessions/[id]/messages — append messages to a session */
+/**
+ * POST /api/web-sessions/[id]/messages — append or upsert messages.
+ *
+ * Uses upsert semantics: if a message with the same `id` already exists
+ * in the session JSONL, it is replaced in-place. Otherwise the message
+ * is appended. This supports both the client's post-stream save and the
+ * server-side incremental persistence from the ActiveRunManager.
+ */
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -43,10 +49,38 @@ export async function POST(
     return Response.json({ error: "messages array required" }, { status: 400 });
   }
 
-  // Append each message as a JSONL line
+  // Read existing lines for upsert checks.
+  const existing = readFileSync(filePath, "utf-8");
+  const lines = existing.split("\n").filter((l) => l.trim());
+  let newCount = 0;
+
   for (const msg of messages) {
-    appendFileSync(filePath, JSON.stringify(msg) + "\n");
+    const msgId = typeof msg.id === "string" ? msg.id : undefined;
+    let found = false;
+
+    if (msgId) {
+      for (let i = 0; i < lines.length; i++) {
+        try {
+          const parsed = JSON.parse(lines[i]);
+          if (parsed.id === msgId) {
+            // Replace the existing line in-place.
+            lines[i] = JSON.stringify(msg);
+            found = true;
+            break;
+          }
+        } catch {
+          /* keep malformed lines as-is */
+        }
+      }
+    }
+
+    if (!found) {
+      lines.push(JSON.stringify(msg));
+      newCount++;
+    }
   }
+
+  writeFileSync(filePath, lines.join("\n") + "\n");
 
   // Update index metadata
   try {
@@ -57,8 +91,8 @@ export async function POST(
       const session = index.find((s) => s.id === id);
       if (session) {
         session.updatedAt = Date.now();
-        session.messageCount += messages.length;
-        if (title) session.title = title;
+        if (newCount > 0) {session.messageCount += newCount;}
+        if (title) {session.title = title;}
         writeFileSync(INDEX_FILE, JSON.stringify(index, null, 2));
       }
     }
