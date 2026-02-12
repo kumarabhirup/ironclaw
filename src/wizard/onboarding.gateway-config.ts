@@ -247,6 +247,7 @@ export async function configureGatewayForOnboarding(
         mode: tailscaleMode as GatewayTailscaleMode,
         resetOnExit: tailscaleResetOnExit,
       },
+      webApp: { enabled: true },
     },
   };
 

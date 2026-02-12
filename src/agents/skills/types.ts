@@ -18,6 +18,9 @@ export type SkillInstallSpec = {
 
 export type OpenClawSkillMetadata = {
   always?: boolean;
+  /** If true, the full skill content is injected into the system prompt automatically
+   * (like a bootstrap file) instead of being lazy-loaded via the skills list. */
+  inject?: boolean;
   skillKey?: string;
   primaryEnv?: string;
   emoji?: string;
@@ -79,9 +82,16 @@ export type SkillEligibilityContext = {
   };
 };
 
+export type InjectedSkillContent = {
+  name: string;
+  content: string;
+};
+
 export type SkillSnapshot = {
   prompt: string;
   skills: Array<{ name: string; primaryEnv?: string }>;
   resolvedSkills?: Skill[];
+  /** Skills with `inject: true` whose full content should be included in the system prompt. */
+  injectedSkills?: InjectedSkillContent[];
   version?: number;
 };

@@ -6,9 +6,7 @@ import type { RuntimeEnv } from "../runtime.js";
 import type { GatewayWizardSettings, WizardFlow } from "./onboarding.types.js";
 import type { WizardPrompter } from "./prompts.js";
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../agents/workspace.js";
-import { resolveCliName } from "../cli/cli-name.js";
 import { formatCliCommand } from "../cli/command-format.js";
-import { installCompletion } from "../cli/completion-cli.js";
 import {
   buildGatewayInstallPlan,
   gatewayInstallErrorHint,
@@ -17,10 +15,6 @@ import {
   DEFAULT_GATEWAY_DAEMON_RUNTIME,
   GATEWAY_DAEMON_RUNTIME_OPTIONS,
 } from "../commands/daemon-runtime.js";
-import {
-  checkShellCompletionStatus,
-  ensureCompletionCacheExists,
-} from "../commands/doctor-completion.js";
 import { formatHealthCheckFailure } from "../commands/health-format.js";
 import { healthCommand } from "../commands/health.js";
 import {
@@ -33,10 +27,12 @@ import {
 } from "../commands/onboard-helpers.js";
 import { resolveGatewayService } from "../daemon/service.js";
 import { isSystemdUserServiceAvailable } from "../daemon/systemd.js";
+import { DEFAULT_WEB_APP_PORT, ensureWebAppBuilt } from "../gateway/server-web-app.js";
 import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
 import { restoreTerminalState } from "../terminal/restore.js";
 import { runTui } from "../tui/tui.js";
 import { resolveUserPath } from "../utils.js";
+import { setupOnboardingShellCompletion } from "./onboarding.completion.js";
 
 type FinalizeOnboardingOptions = {
   flow: WizardFlow;
@@ -88,6 +84,24 @@ export async function finalizeOnboardingWizard(
         "Linux installs use a systemd user service by default. Without lingering, systemd stops the user session on logout/idle and kills the Gateway.",
       requireConfirm: false,
     });
+  }
+
+  // Pre-build web app + Control UI assets before daemon install so the
+  // gateway doesn't block on builds when it boots for the first time.
+  const controlUiEnabled =
+    nextConfig.gateway?.controlUi?.enabled ?? baseConfig.gateway?.controlUi?.enabled ?? true;
+  if (!opts.skipUi && controlUiEnabled) {
+    const webAppResult = await ensureWebAppBuilt(runtime, {
+      webAppConfig: nextConfig.gateway?.webApp,
+    });
+    if (!webAppResult.ok && webAppResult.message) {
+      runtime.error(webAppResult.message);
+    }
+
+    const controlUiAssets = await ensureControlUiAssetsBuilt(runtime);
+    if (!controlUiAssets.ok && controlUiAssets.message) {
+      runtime.error(controlUiAssets.message);
+    }
   }
 
   const explicitInstallDaemon =
@@ -228,15 +242,6 @@ export async function finalizeOnboardingWizard(
     }
   }
 
-  const controlUiEnabled =
-    nextConfig.gateway?.controlUi?.enabled ?? baseConfig.gateway?.controlUi?.enabled ?? true;
-  if (!opts.skipUi && controlUiEnabled) {
-    const controlUiAssets = await ensureControlUiAssetsBuilt(runtime);
-    if (!controlUiAssets.ok && controlUiAssets.message) {
-      runtime.error(controlUiAssets.message);
-    }
-  }
-
   await prompter.note(
     [
       "Add nodes for extra features:",
@@ -345,34 +350,23 @@ export async function finalizeOnboardingWizard(
       });
       launchedTui = true;
     } else if (hatchChoice === "web") {
+      const webAppPort = nextConfig.gateway?.webApp?.port ?? DEFAULT_WEB_APP_PORT;
+      const webAppUrl = `http://localhost:${webAppPort}`;
       const browserSupport = await detectBrowserOpenSupport();
       if (browserSupport.ok) {
-        controlUiOpened = await openUrl(authedUrl);
-        if (!controlUiOpened) {
-          controlUiOpenHint = formatControlUiSshHint({
-            port: settings.port,
-            basePath: controlUiBasePath,
-            token: settings.authMode === "token" ? settings.gatewayToken : undefined,
-          });
-        }
-      } else {
-        controlUiOpenHint = formatControlUiSshHint({
-          port: settings.port,
-          basePath: controlUiBasePath,
-          token: settings.authMode === "token" ? settings.gatewayToken : undefined,
-        });
+        controlUiOpened = await openUrl(webAppUrl);
       }
       await prompter.note(
         [
-          `Dashboard link (with token): ${authedUrl}`,
+          `Ironclaw Web UI: ${webAppUrl}`,
           controlUiOpened
-            ? "Opened in your browser. Keep that tab to control OpenClaw."
-            : "Copy/paste this URL in a browser on this machine to control OpenClaw.",
-          controlUiOpenHint,
+            ? "Opened in your browser."
+            : "Copy/paste this URL in a browser on this machine.",
+          `Dashboard (control UI): ${authedUrl}`,
         ]
           .filter(Boolean)
           .join("\n"),
-        "Dashboard ready",
+        "Web UI ready",
       );
     } else {
       await prompter.note(
@@ -397,50 +391,7 @@ export async function finalizeOnboardingWizard(
     "Security",
   );
 
-  // Shell completion setup
-  const cliName = resolveCliName();
-  const completionStatus = await checkShellCompletionStatus(cliName);
-
-  if (completionStatus.usesSlowPattern) {
-    // Case 1: Profile uses slow dynamic pattern - silently upgrade to cached version
-    const cacheGenerated = await ensureCompletionCacheExists(cliName);
-    if (cacheGenerated) {
-      await installCompletion(completionStatus.shell, true, cliName);
-    }
-  } else if (completionStatus.profileInstalled && !completionStatus.cacheExists) {
-    // Case 2: Profile has completion but no cache - auto-fix silently
-    await ensureCompletionCacheExists(cliName);
-  } else if (!completionStatus.profileInstalled) {
-    // Case 3: No completion at all - prompt to install
-    const installShellCompletion = await prompter.confirm({
-      message: `Enable ${completionStatus.shell} shell completion for ${cliName}?`,
-      initialValue: true,
-    });
-    if (installShellCompletion) {
-      // Generate cache first (required for fast shell startup)
-      const cacheGenerated = await ensureCompletionCacheExists(cliName);
-      if (cacheGenerated) {
-        // Install to shell profile
-        await installCompletion(completionStatus.shell, true, cliName);
-        const profileHint =
-          completionStatus.shell === "zsh"
-            ? "~/.zshrc"
-            : completionStatus.shell === "bash"
-              ? "~/.bashrc"
-              : "~/.config/fish/config.fish";
-        await prompter.note(
-          `Shell completion installed. Restart your shell or run: source ${profileHint}`,
-          "Shell completion",
-        );
-      } else {
-        await prompter.note(
-          `Failed to generate completion cache. Run \`${cliName} completion --install\` later.`,
-          "Shell completion",
-        );
-      }
-    }
-  }
-  // Case 4: Both profile and cache exist (using cached version) - all good, nothing to do
+  await setupOnboardingShellCompletion({ flow, prompter });
 
   const shouldOpenControlUi =
     !opts.skipUi &&
@@ -470,8 +421,8 @@ export async function finalizeOnboardingWizard(
       [
         `Dashboard link (with token): ${authedUrl}`,
         controlUiOpened
-          ? "Opened in your browser. Keep that tab to control OpenClaw."
-          : "Copy/paste this URL in a browser on this machine to control OpenClaw.",
+          ? "Opened in your browser. Keep that tab to control Ironclaw."
+          : "Copy/paste this URL in a browser on this machine to control Ironclaw.",
         controlUiOpenHint,
       ]
         .filter(Boolean)
@@ -496,7 +447,7 @@ export async function finalizeOnboardingWizard(
       : [
           "If you want your agent to be able to search the web, you’ll need an API key.",
           "",
-          "OpenClaw uses Brave Search for the `web_search` tool. Without a Brave Search API key, web search won’t work.",
+          "Ironclaw uses Brave Search for the `web_search` tool. Without a Brave Search API key, web search won’t work.",
           "",
           "Set it up interactively:",
           `- Run: ${formatCliCommand("openclaw configure --section web")}`,
@@ -515,10 +466,10 @@ export async function finalizeOnboardingWizard(
 
   await prompter.outro(
     controlUiOpened
-      ? "Onboarding complete. Dashboard opened; keep that tab to control OpenClaw."
+      ? "Onboarding complete. Web UI opened; keep that tab to control Ironclaw."
       : seededInBackground
-        ? "Onboarding complete. Web UI seeded in the background; open it anytime with the dashboard link above."
-        : "Onboarding complete. Use the dashboard link above to control OpenClaw.",
+        ? "Onboarding complete. Web UI seeded in the background; open it anytime with the link above."
+        : "Onboarding complete. Use the links above to control Ironclaw.",
   );
 
   return { launchedTui };

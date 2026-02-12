@@ -99,6 +99,7 @@ export function applyNonInteractiveGatewayConfig(params: {
         mode: tailscaleMode,
         resetOnExit: tailscaleResetOnExit,
       },
+      webApp: { enabled: true },
     },
   };
 

@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
 import type {
+  InjectedSkillContent,
   ParsedSkillFrontmatter,
   SkillEligibilityContext,
   SkillCommandSpec,
@@ -188,6 +189,23 @@ function loadSkillEntries(
   return skillEntries;
 }
 
+/** Read and strip frontmatter from a SKILL.md file, returning the body content. */
+function readSkillContent(filePath: string): string | undefined {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    // Strip YAML frontmatter (--- ... ---)
+    if (raw.startsWith("---")) {
+      const endIndex = raw.indexOf("\n---", 3);
+      if (endIndex !== -1) {
+        return raw.slice(endIndex + "\n---".length).trim();
+      }
+    }
+    return raw.trim();
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildWorkspaceSkillSnapshot(
   workspaceDir: string,
   opts?: {
@@ -208,12 +226,36 @@ export function buildWorkspaceSkillSnapshot(
     opts?.skillFilter,
     opts?.eligibility,
   );
-  const promptEntries = eligible.filter(
+
+  // Separate injected skills (inject: true) from lazy-loaded skills.
+  // Injected skills have their full content included in the system prompt automatically.
+  const injectedEntries: SkillEntry[] = [];
+  const lazyEntries: SkillEntry[] = [];
+  for (const entry of eligible) {
+    if (entry.metadata?.inject === true) {
+      injectedEntries.push(entry);
+    } else {
+      lazyEntries.push(entry);
+    }
+  }
+
+  // Build lazy-loaded skills prompt (XML format for on-demand reading)
+  const promptEntries = lazyEntries.filter(
     (entry) => entry.invocation?.disableModelInvocation !== true,
   );
   const resolvedSkills = promptEntries.map((entry) => entry.skill);
   const remoteNote = opts?.eligibility?.remote?.note?.trim();
   const prompt = [remoteNote, formatSkillsForPrompt(resolvedSkills)].filter(Boolean).join("\n");
+
+  // Read full content of injected skills
+  const injectedSkills: InjectedSkillContent[] = [];
+  for (const entry of injectedEntries) {
+    const content = readSkillContent(entry.skill.filePath);
+    if (content) {
+      injectedSkills.push({ name: entry.skill.name, content });
+    }
+  }
+
   return {
     prompt,
     skills: eligible.map((entry) => ({
@@ -221,6 +263,7 @@ export function buildWorkspaceSkillSnapshot(
       primaryEnv: entry.metadata?.primaryEnv,
     })),
     resolvedSkills,
+    injectedSkills: injectedSkills.length > 0 ? injectedSkills : undefined,
     version: opts?.snapshotVersion,
   };
 }

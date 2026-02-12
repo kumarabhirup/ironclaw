@@ -211,6 +211,15 @@ export type GatewayNodesConfig = {
   denyCommands?: string[];
 };
 
+export type GatewayWebAppConfig = {
+  /** If true, the Gateway will build and serve the Ironclaw Next.js web app. Default: false. */
+  enabled?: boolean;
+  /** Port for the Next.js web app (default: 3100). */
+  port?: number;
+  /** Run in dev mode (`next dev`) instead of production (`next build && next start`). Default: false. */
+  dev?: boolean;
+};
+
 export type GatewayConfig = {
   /** Single multiplexed port for Gateway WS + HTTP (default: 18789). */
   port?: number;
@@ -245,4 +254,6 @@ export type GatewayConfig = {
    * `x-real-ip`) to determine the client IP for local pairing and HTTP checks.
    */
   trustedProxies?: string[];
+  /** Ironclaw Next.js web app served alongside the gateway. */
+  webApp?: GatewayWebAppConfig;
 };

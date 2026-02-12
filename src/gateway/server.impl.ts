@@ -88,6 +88,7 @@ const logDiscovery = log.child("discovery");
 const logTailscale = log.child("tailscale");
 const logChannels = log.child("channels");
 const logBrowser = log.child("browser");
+const logWebApp = log.child("webapp");
 const logHealth = log.child("health");
 const logCron = log.child("cron");
 const logReload = log.child("reload");
@@ -214,6 +215,27 @@ export async function startGatewayServer(
       );
     } catch (err) {
       log.warn(`gateway: failed to persist plugin auto-enable changes: ${String(err)}`);
+    }
+  }
+
+  // Ensure gateway.webApp is enabled by default for all configs.
+  // Existing configs created before the web app feature won't have this key,
+  // so we backfill it on startup and persist.
+  {
+    const currentCfg = loadConfig();
+    if (currentCfg.gateway?.webApp === undefined) {
+      try {
+        await writeConfigFile({
+          ...currentCfg,
+          gateway: {
+            ...currentCfg.gateway,
+            webApp: { enabled: true },
+          },
+        });
+        log.info("gateway: auto-enabled webApp (gateway.webApp.enabled = true)");
+      } catch (err) {
+        log.warn(`gateway: failed to persist webApp auto-enable: ${String(err)}`);
+      }
     }
   }
 
@@ -546,7 +568,8 @@ export async function startGatewayServer(
   });
 
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
-  ({ browserControl, pluginServices } = await startGatewaySidecars({
+  let webApp: Awaited<ReturnType<typeof startGatewaySidecars>>["webApp"] = null;
+  ({ browserControl, pluginServices, webApp } = await startGatewaySidecars({
     cfg: cfgAtStart,
     pluginRegistry,
     defaultWorkspaceDir,
@@ -556,6 +579,7 @@ export async function startGatewayServer(
     logHooks,
     logChannels,
     logBrowser,
+    logWebApp,
   }));
 
   const { applyHotReload, requestGatewayRestart } = createGatewayReloadHandlers({
@@ -617,6 +641,7 @@ export async function startGatewayServer(
     clients,
     configReloader,
     browserControl,
+    webApp,
     wss,
     httpServer,
     httpServers,

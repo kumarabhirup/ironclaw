@@ -18,6 +18,7 @@ const readConfigFileSnapshot = vi.hoisted(() =>
 const ensureSystemdUserLingerInteractive = vi.hoisted(() => vi.fn(async () => {}));
 const isSystemdUserServiceAvailable = vi.hoisted(() => vi.fn(async () => true));
 const ensureControlUiAssetsBuilt = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const ensureWebAppBuilt = vi.hoisted(() => vi.fn(async () => ({ ok: true, built: false })));
 const runTui = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("../commands/onboard-channels.js", () => ({
@@ -63,6 +64,11 @@ vi.mock("../commands/systemd-linger.js", () => ({
 
 vi.mock("../daemon/systemd.js", () => ({
   isSystemdUserServiceAvailable,
+}));
+
+vi.mock("../gateway/server-web-app.js", () => ({
+  ensureWebAppBuilt,
+  DEFAULT_WEB_APP_PORT: 3100,
 }));
 
 vi.mock("../infra/control-ui-assets.js", () => ({

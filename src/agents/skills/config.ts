@@ -136,7 +136,7 @@ export function shouldIncludeSkill(params: {
   ) {
     return false;
   }
-  if (entry.metadata?.always === true) {
+  if (entry.metadata?.always === true || entry.metadata?.inject === true) {
     return true;
   }
 

@@ -14,6 +14,8 @@ export type WebSessionMeta = {
   createdAt: number;
   updatedAt: number;
   messageCount: number;
+  /** When set, this session is scoped to a specific workspace file. */
+  filePath?: string;
 };
 
 function ensureDir() {
@@ -24,7 +26,7 @@ function ensureDir() {
 
 function readIndex(): WebSessionMeta[] {
   ensureDir();
-  if (!existsSync(INDEX_FILE)) return [];
+  if (!existsSync(INDEX_FILE)) {return [];}
   try {
     return JSON.parse(readFileSync(INDEX_FILE, "utf-8"));
   } catch {
@@ -37,9 +39,18 @@ function writeIndex(sessions: WebSessionMeta[]) {
   writeFileSync(INDEX_FILE, JSON.stringify(sessions, null, 2));
 }
 
-/** GET /api/web-sessions — list all web chat sessions */
-export async function GET() {
-  const sessions = readIndex();
+/** GET /api/web-sessions — list web chat sessions.
+ *  ?filePath=... → returns only sessions scoped to that file.
+ *  No filePath   → returns only global (non-file) sessions. */
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const filePath = url.searchParams.get("filePath");
+
+  const all = readIndex();
+  const sessions = filePath
+    ? all.filter((s) => s.filePath === filePath)
+    : all.filter((s) => !s.filePath);
+
   return Response.json({ sessions });
 }
 
@@ -53,6 +64,7 @@ export async function POST(req: Request) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     messageCount: 0,
+    ...(body.filePath ? { filePath: body.filePath } : {}),
   };
 
   const sessions = readIndex();

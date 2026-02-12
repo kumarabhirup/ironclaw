@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   writeConfigFile: vi.fn(),
   resolveGatewayPort: vi.fn(),
   ensureControlUiAssetsBuilt: vi.fn(),
+  ensureWebAppBuilt: vi.fn(async () => ({ ok: true, built: false })),
   createClackPrompter: vi.fn(),
   note: vi.fn(),
   printWizardHeader: vi.fn(),
@@ -33,6 +34,10 @@ vi.mock("../config/config.js", () => ({
   readConfigFileSnapshot: mocks.readConfigFileSnapshot,
   writeConfigFile: mocks.writeConfigFile,
   resolveGatewayPort: mocks.resolveGatewayPort,
+}));
+
+vi.mock("../gateway/server-web-app.js", () => ({
+  ensureWebAppBuilt: mocks.ensureWebAppBuilt,
 }));
 
 vi.mock("../infra/control-ui-assets.js", () => ({
@@ -95,6 +100,7 @@ vi.mock("./onboard-channels.js", () => ({
   setupChannels: vi.fn(),
 }));
 
+import { WizardCancelledError } from "../wizard/prompts.js";
 import { runConfigureWizard } from "./configure.wizard.js";
 
 describe("runConfigureWizard", () => {
@@ -132,5 +138,29 @@ describe("runConfigureWizard", () => {
         gateway: expect.objectContaining({ mode: "local" }),
       }),
     );
+  });
+
+  it("exits with code 1 when configure wizard is cancelled", async () => {
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: false,
+      valid: true,
+      config: {},
+      issues: [],
+    });
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.createClackPrompter.mockReturnValue({});
+    mocks.clackSelect.mockRejectedValueOnce(new WizardCancelledError());
+
+    await runConfigureWizard({ command: "configure" }, runtime);
+
+    expect(runtime.exit).toHaveBeenCalledWith(1);
   });
 });

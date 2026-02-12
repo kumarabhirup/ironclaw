@@ -18,6 +18,7 @@ import {
 } from "../commands/auth-choice.js";
 import { applyPrimaryModel, promptDefaultModel } from "../commands/model-picker.js";
 import { setupChannels } from "../commands/onboard-channels.js";
+import { promptCustomApiConfig } from "../commands/onboard-custom.js";
 import {
   applyWizardMetadata,
   DEFAULT_WORKSPACE,
@@ -55,11 +56,11 @@ async function requireRiskAcknowledgement(params: {
     [
       "Security warning — please read.",
       "",
-      "OpenClaw is a hobby project and still in beta. Expect sharp edges.",
+      "Ironclaw is a hobby project and still in beta. Expect sharp edges.",
       "This bot can read files and run actions if tools are enabled.",
       "A bad prompt can trick it into doing unsafe things.",
       "",
-      "If you’re not comfortable with basic security and access control, don’t run OpenClaw.",
+      "If you’re not comfortable with basic security and access control, don’t run Ironclaw.",
       "Ask someone experienced to help before enabling tools or exposing it to the internet.",
       "",
       "Recommended baseline:",
@@ -92,7 +93,7 @@ export async function runOnboardingWizard(
   prompter: WizardPrompter,
 ) {
   printWizardHeader(runtime);
-  await prompter.intro("OpenClaw onboarding");
+  await prompter.intro("Ironclaw onboarding");
   await requireRiskAcknowledgement({ opts, prompter });
 
   const snapshot = await readConfigFileSnapshot();
@@ -378,26 +379,38 @@ export async function runOnboardingWizard(
       includeSkip: true,
     }));
 
-  const authResult = await applyAuthChoice({
-    authChoice,
-    config: nextConfig,
-    prompter,
-    runtime,
-    setDefaultModel: true,
-    opts: {
-      tokenProvider: opts.tokenProvider,
-      token: opts.authChoice === "apiKey" && opts.token ? opts.token : undefined,
-    },
-  });
-  nextConfig = authResult.config;
+  let customPreferredProvider: string | undefined;
+  if (authChoice === "custom-api-key") {
+    const customResult = await promptCustomApiConfig({
+      prompter,
+      runtime,
+      config: nextConfig,
+    });
+    nextConfig = customResult.config;
+    customPreferredProvider = customResult.providerId;
+  } else {
+    const authResult = await applyAuthChoice({
+      authChoice,
+      config: nextConfig,
+      prompter,
+      runtime,
+      setDefaultModel: true,
+      opts: {
+        tokenProvider: opts.tokenProvider,
+        token: opts.authChoice === "apiKey" && opts.token ? opts.token : undefined,
+      },
+    });
+    nextConfig = authResult.config;
+  }
 
-  if (authChoiceFromPrompt) {
+  if (authChoiceFromPrompt && authChoice !== "custom-api-key") {
     const modelSelection = await promptDefaultModel({
       config: nextConfig,
       prompter,
       allowKeep: true,
       ignoreAllowlist: true,
-      preferredProvider: resolvePreferredProviderForAuthChoice(authChoice),
+      preferredProvider:
+        customPreferredProvider ?? resolvePreferredProviderForAuthChoice(authChoice),
     });
     if (modelSelection.model) {
       nextConfig = applyPrimaryModel(nextConfig, modelSelection.model);

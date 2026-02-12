@@ -44,6 +44,8 @@ export type CallGatewayOptions = {
   configPath?: string;
   /** Optional callback for gateway events received while the request is in flight. */
   onEvent?: (evt: { event: string; payload?: unknown; seq?: number }) => void;
+  /** Client capabilities to advertise during the WebSocket handshake (e.g. "tool-events"). */
+  caps?: string[];
 };
 
 export type GatewayConnectionDetails = {
@@ -272,6 +274,7 @@ export async function callGateway<T = Record<string, unknown>>(
       mode: opts.mode ?? GATEWAY_CLIENT_MODES.CLI,
       role: "operator",
       scopes: ["operator.admin", "operator.approvals", "operator.pairing"],
+      caps: opts.caps,
       deviceIdentity: loadOrCreateDeviceIdentity(),
       minProtocol: opts.minProtocol ?? PROTOCOL_VERSION,
       maxProtocol: opts.maxProtocol ?? PROTOCOL_VERSION,

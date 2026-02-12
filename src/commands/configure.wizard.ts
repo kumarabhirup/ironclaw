@@ -8,6 +8,7 @@ import type {
 import { formatCliCommand } from "../cli/command-format.js";
 import { readConfigFileSnapshot, resolveGatewayPort, writeConfigFile } from "../config/config.js";
 import { logConfigUpdated } from "../config/logging.js";
+import { ensureWebAppBuilt } from "../gateway/server-web-app.js";
 import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
 import { defaultRuntime } from "../runtime.js";
 import { note } from "../terminal/note.js";
@@ -177,7 +178,7 @@ async function promptEngineConfig(
 
   note(
     [
-      "OpenClaw supports two LLM engines for agent orchestration:",
+      "Ironclaw supports two LLM engines for agent orchestration:",
       "",
       "• AI SDK (default): Vercel's AI SDK v6 - modern, flexible, supports AI Gateway",
       "• pi-agent: Original implementation - battle-tested, full feature set",
@@ -189,7 +190,7 @@ async function promptEngineConfig(
 
   const engineChoice = guardCancel(
     await select<"aisdk" | "pi-agent">({
-      message: "Which LLM engine should OpenClaw use?",
+      message: "Which LLM engine should Ironclaw use?",
       options: [
         {
           value: "aisdk",
@@ -222,7 +223,7 @@ export async function runConfigureWizard(
 ) {
   try {
     printWizardHeader(runtime);
-    intro(opts.command === "update" ? "OpenClaw update wizard" : "OpenClaw configure");
+    intro(opts.command === "update" ? "Ironclaw update wizard" : "Ironclaw configure");
     const prompter = createClackPrompter();
 
     const snapshot = await readConfigFileSnapshot();
@@ -591,6 +592,12 @@ export async function runConfigureWizard(
       }
     }
 
+    const webAppResult = await ensureWebAppBuilt(runtime, {
+      webAppConfig: nextConfig.gateway?.webApp,
+    });
+    if (!webAppResult.ok && webAppResult.message) {
+      runtime.error(webAppResult.message);
+    }
     const controlUiAssets = await ensureControlUiAssetsBuilt(runtime);
     if (!controlUiAssets.ok && controlUiAssets.message) {
       runtime.error(controlUiAssets.message);
@@ -638,7 +645,7 @@ export async function runConfigureWizard(
     outro("Configure complete.");
   } catch (err) {
     if (err instanceof WizardCancelledError) {
-      runtime.exit(0);
+      runtime.exit(1);
       return;
     }
     throw err;

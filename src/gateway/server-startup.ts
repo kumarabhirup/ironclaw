@@ -22,6 +22,8 @@ import {
   scheduleRestartSentinelWake,
   shouldWakeFromRestartSentinel,
 } from "./server-restart-sentinel.js";
+import { startGatewayMemoryBackend } from "./server-startup-memory.js";
+import { type WebAppHandle, startWebAppIfEnabled } from "./server-web-app.js";
 
 export async function startGatewaySidecars(params: {
   cfg: ReturnType<typeof loadConfig>;
@@ -37,6 +39,11 @@ export async function startGatewaySidecars(params: {
   };
   logChannels: { info: (msg: string) => void; error: (msg: string) => void };
   logBrowser: { error: (msg: string) => void };
+  logWebApp: {
+    info: (msg: string) => void;
+    warn: (msg: string) => void;
+    error: (msg: string) => void;
+  };
 }) {
   // Start OpenClaw browser control server (unless disabled via config).
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
@@ -44,6 +51,14 @@ export async function startGatewaySidecars(params: {
     browserControl = await startBrowserControlServerIfEnabled();
   } catch (err) {
     params.logBrowser.error(`server failed to start: ${String(err)}`);
+  }
+
+  // Start the Ironclaw Next.js web app if enabled (gateway.webApp.enabled).
+  let webApp: WebAppHandle | null = null;
+  try {
+    webApp = await startWebAppIfEnabled(params.cfg.gateway?.webApp, params.logWebApp);
+  } catch (err) {
+    params.logWebApp.error(`web app failed to start: ${String(err)}`);
   }
 
   // Start Gmail watcher if configured (hooks.gmail.account).
@@ -150,11 +165,15 @@ export async function startGatewaySidecars(params: {
     params.log.warn(`plugin services failed to start: ${String(err)}`);
   }
 
+  void startGatewayMemoryBackend({ cfg: params.cfg, log: params.log }).catch((err) => {
+    params.log.warn(`qmd memory startup initialization failed: ${String(err)}`);
+  });
+
   if (shouldWakeFromRestartSentinel()) {
     setTimeout(() => {
       void scheduleRestartSentinelWake({ deps: params.deps });
     }, 750);
   }
 
-  return { browserControl, pluginServices };
+  return { browserControl, pluginServices, webApp };
 }

@@ -1,338 +1,89 @@
 "use client";
 
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChatMessage } from "./components/chat-message";
-import { Sidebar } from "./components/sidebar";
-
-const transport = new DefaultChatTransport({ api: "/api/chat" });
+import Link from "next/link";
 
 export default function Home() {
-  const { messages, sendMessage, status, stop, error, setMessages } = useChat({ transport });
-  const [input, setInput] = useState("");
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [loadingSession, setLoadingSession] = useState(false);
-  const [startingNewSession, setStartingNewSession] = useState(false);
-  const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // Track which messages have already been persisted to avoid double-saves
-  const savedMessageIdsRef = useRef<Set<string>>(new Set());
-  // Set when /new or + explicitly triggers a new session, so we can record
-  // the /new command as the first entry when the session is actually created.
-  const newSessionPendingRef = useRef(false);
-
-  // Auto-scroll to bottom on new messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const isStreaming = status === "streaming" || status === "submitted";
-
-  const refreshSidebar = useCallback(() => {
-    setSidebarRefreshKey((k) => k + 1);
-  }, []);
-
-  /** Persist messages to the web session's .jsonl file.
-   *  Saves the full `parts` array (reasoning, tool calls, output, text)
-   *  alongside a plain-text `content` field for backward compat / sidebar. */
-  const saveMessages = useCallback(
-    async (
-      sessionId: string,
-      msgs: Array<{
-        id: string;
-        role: string;
-        content: string;
-        parts?: unknown[];
-      }>,
-      title?: string,
-    ) => {
-      const toSave = msgs.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        // Persist full UIMessage parts so reasoning + tool calls survive reload
-        ...(m.parts ? { parts: m.parts } : {}),
-        timestamp: new Date().toISOString(),
-      }));
-      try {
-        await fetch(`/api/web-sessions/${sessionId}/messages`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: toSave, title }),
-        });
-        for (const m of msgs) {savedMessageIdsRef.current.add(m.id);}
-        refreshSidebar();
-      } catch (err) {
-        console.error("Failed to save messages:", err);
-      }
-    },
-    [refreshSidebar],
-  );
-
-  /** Create a new web chat session and return its ID */
-  const createSession = useCallback(async (title: string): Promise<string> => {
-    const res = await fetch("/api/web-sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    });
-    const data = await res.json();
-    return data.session.id;
-  }, []);
-
-  /** Extract plain text from a UIMessage */
-  const getMessageText = useCallback(
-    (msg: (typeof messages)[number]): string => {
-      return (
-        msg.parts
-          ?.filter((p): p is { type: "text"; text: string } => p.type === "text")
-          .map((p) => p.text)
-          .join("\n") ?? ""
-      );
-    },
-    [],
-  );
-
-  // When streaming finishes, persist all unsaved messages (user + assistant).
-  // This is the single save-point for chat messages — handleSubmit only saves
-  // the synthetic /new marker; actual user/assistant messages are saved here
-  // so their ids match what useChat tracks (avoids duplicate-id issues).
-  const prevStatusRef = useRef(status);
-  useEffect(() => {
-    const wasStreaming =
-      prevStatusRef.current === "streaming" || prevStatusRef.current === "submitted";
-    const isNowReady = status === "ready";
-
-    if (wasStreaming && isNowReady && currentSessionId) {
-      const unsaved = messages.filter((m) => !savedMessageIdsRef.current.has(m.id));
-      if (unsaved.length > 0) {
-        const toSave = unsaved.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: getMessageText(m),
-          parts: m.parts,
-        }));
-        saveMessages(currentSessionId, toSave);
-      }
-    }
-    prevStatusRef.current = status;
-  }, [status, messages, currentSessionId, saveMessages, getMessageText]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isStreaming) {return;}
-
-    const userText = input.trim();
-    setInput("");
-
-    // "/new" triggers a new session (same as clicking the + button)
-    if (userText.toLowerCase() === "/new") {
-      handleNewSession();
-      return;
-    }
-
-    // Create a session if we don't have one yet
-    let sessionId = currentSessionId;
-    if (!sessionId) {
-      const title = userText.length > 60 ? userText.slice(0, 60) + "..." : userText;
-      sessionId = await createSession(title);
-      setCurrentSessionId(sessionId);
-      refreshSidebar();
-
-      // If this session was triggered by /new or +, record it as the first entry
-      if (newSessionPendingRef.current) {
-        newSessionPendingRef.current = false;
-        const newMsgId = `system-new-${Date.now()}`;
-        await saveMessages(sessionId, [
-          {
-            id: newMsgId,
-            role: "user",
-            content: "/new",
-            parts: [{ type: "text", text: "/new" }],
-          },
-        ]);
-      }
-    }
-
-    // Don't save the user message eagerly here — the useEffect that fires
-    // when streaming finishes saves all unsaved messages (user + assistant)
-    // using useChat's own ids, which avoids duplicate entries.
-
-    // Send to agent
-    sendMessage({ text: userText });
-  };
-
-  /** Load a previous web chat session */
-  const handleSessionSelect = useCallback(
-    async (sessionId: string) => {
-      if (sessionId === currentSessionId) {return;}
-
-      setLoadingSession(true);
-      setCurrentSessionId(sessionId);
-      savedMessageIdsRef.current.clear();
-
-      try {
-        const response = await fetch(`/api/web-sessions/${sessionId}`);
-        if (!response.ok) {throw new Error("Failed to load session");}
-
-        const data = await response.json();
-        const sessionMessages: Array<{
-          id: string;
-          role: "user" | "assistant";
-          content: string;
-          parts?: Array<Record<string, unknown>>;
-        }> = data.messages || [];
-
-        // Convert to UIMessage format and mark all as saved.
-        // Restore from saved `parts` if available (preserves reasoning,
-        // tool calls, output), falling back to plain text for old sessions.
-        const uiMessages = sessionMessages.map((msg) => {
-          savedMessageIdsRef.current.add(msg.id);
-          return {
-            id: msg.id,
-            role: msg.role,
-            parts: msg.parts ?? [{ type: "text" as const, text: msg.content }],
-          };
-        });
-
-        setMessages(uiMessages);
-      } catch (err) {
-        console.error("Error loading session:", err);
-      } finally {
-        setLoadingSession(false);
-      }
-    },
-    [currentSessionId, setMessages],
-  );
-
-  /** Start a brand new session: clear UI, send /new to agent */
-  const handleNewSession = useCallback(async () => {
-    // Clear the UI immediately
-    setCurrentSessionId(null);
-    setMessages([]);
-    savedMessageIdsRef.current.clear();
-    // Mark that the next session should start with a /new entry
-    newSessionPendingRef.current = true;
-
-    // Send /new to the agent backend to start a fresh session
-    setStartingNewSession(true);
-    try {
-      await fetch("/api/new-session", { method: "POST" });
-    } catch (err) {
-      console.error("Failed to send /new:", err);
-    } finally {
-      setStartingNewSession(false);
-    }
-  }, [setMessages]);
-
   return (
-    <div className="flex h-screen">
-      <Sidebar
-        onSessionSelect={handleSessionSelect}
-        onNewSession={handleNewSession}
-        activeSessionId={currentSessionId ?? undefined}
-        refreshKey={sidebarRefreshKey}
-      />
+    <div
+      className="flex flex-col items-center justify-center min-h-screen px-6"
+      style={{ background: "var(--color-bg)" }}
+    >
+      {/* Logo / brand mark */}
+      <div
+        className="mb-8 w-16 h-16 rounded-2xl flex items-center justify-center"
+        style={{
+          background: "var(--color-accent-light)",
+          boxShadow: "var(--shadow-md)",
+        }}
+      >
+        <svg
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ color: "var(--color-accent)" }}
+        >
+          <rect width="7" height="7" x="3" y="3" rx="1" />
+          <rect width="7" height="7" x="14" y="3" rx="1" />
+          <rect width="7" height="7" x="14" y="14" rx="1" />
+          <rect width="7" height="7" x="3" y="14" rx="1" />
+        </svg>
+      </div>
 
-      {/* Main chat area */}
-      <main className="flex-1 flex flex-col min-w-0">
-        {/* Chat header */}
-        <header className="px-6 py-3 border-b border-[var(--color-border)] flex items-center justify-between bg-[var(--color-surface)]">
-          <div>
-            <h2 className="text-sm font-semibold">
-              {currentSessionId ? "Chat Session" : "New Chat"}
-            </h2>
-            <p className="text-xs text-[var(--color-text-muted)]">
-              {startingNewSession
-                ? "Starting new session..."
-                : loadingSession
-                  ? "Loading session..."
-                  : status === "ready"
-                    ? "Ready"
-                    : status === "submitted"
-                      ? "Thinking..."
-                      : status === "streaming"
-                        ? "Streaming..."
-                        : status === "error"
-                          ? "Error"
-                          : status}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {isStreaming && (
-              <button
-                onClick={() => stop()}
-                className="px-3 py-1 text-xs rounded-md bg-[var(--color-border)] hover:bg-[var(--color-text-muted)] text-[var(--color-text)] transition-colors"
-              >
-                Stop
-              </button>
-            )}
-          </div>
-        </header>
+      {/* Heading */}
+      <h1
+        className="font-instrument text-5xl md:text-6xl tracking-tight mb-3 text-center"
+        style={{ color: "var(--color-text)" }}
+      >
+        Dench
+      </h1>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-6">
-          {loadingSession ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <div className="w-8 h-8 border-2 border-[var(--color-border)] border-t-[var(--color-accent)] rounded-full animate-spin mx-auto mb-4" />
-                <p className="text-sm text-[var(--color-text-muted)]">Loading session...</p>
-              </div>
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <p className="text-6xl mb-4">🦞</p>
-                <h3 className="text-lg font-semibold mb-1">OpenClaw Chat</h3>
-                <p className="text-sm text-[var(--color-text-muted)]">
-                  Send a message to start a conversation with your agent.
-                </p>
-              </div>
-            </div>
-          ) : (
-            <div className="max-w-3xl mx-auto py-4">
-              {messages.map((message) => (
-                <ChatMessage key={message.id} message={message} />
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
+      {/* Tagline */}
+      <p
+        className="text-base mb-10 text-center max-w-md leading-relaxed"
+        style={{ color: "var(--color-text-muted)" }}
+      >
+        Your AI workspace &mdash; chat, knowledge, skills, and memory in one
+        place.
+      </p>
 
-        {/* Error display */}
-        {error && (
-          <div className="px-6 py-2 bg-red-900/20 border-t border-red-800/30">
-            <p className="text-sm text-red-400">Error: {error.message}</p>
-          </div>
-        )}
+      {/* CTA */}
+      <Link
+        href="/workspace"
+        className="inline-flex items-center gap-2.5 px-7 py-3.5 rounded-full text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98]"
+        style={{
+          background: "var(--color-accent)",
+          color: "#fff",
+          boxShadow: "var(--shadow-md)",
+        }}
+      >
+        Open Workspace
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M5 12h14" />
+          <path d="m12 5 7 7-7 7" />
+        </svg>
+      </Link>
 
-        {/* Input */}
-        <div className="px-6 py-4 border-t border-[var(--color-border)] bg-[var(--color-surface)]">
-          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex gap-3">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Message OpenClaw..."
-              disabled={isStreaming || loadingSession || startingNewSession}
-              className="flex-1 px-4 py-3 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent disabled:opacity-50 text-sm"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || isStreaming || loadingSession || startingNewSession}
-              className="px-5 py-3 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white rounded-xl font-medium text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {isStreaming ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                "Send"
-              )}
-            </button>
-          </form>
-        </div>
-      </main>
+      {/* Subtle footer */}
+      <p
+        className="mt-16 text-xs"
+        style={{ color: "var(--color-text-muted)", opacity: 0.5 }}
+      >
+        Powered by OpenClaw
+      </p>
     </div>
   );
 }

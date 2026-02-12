@@ -3,6 +3,7 @@ import type { WebSocketServer } from "ws";
 import type { CanvasHostHandler, CanvasHostServer } from "../canvas-host/server.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
+import type { WebAppHandle } from "./server-web-app.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { stopGmailWatcher } from "../hooks/gmail-watcher.js";
 
@@ -26,6 +27,7 @@ export function createGatewayCloseHandler(params: {
   clients: Set<{ socket: { close: (code: number, reason: string) => void } }>;
   configReloader: { stop: () => Promise<void> };
   browserControl: { stop: () => Promise<void> } | null;
+  webApp: WebAppHandle | null;
   wss: WebSocketServer;
   httpServer: HttpServer;
   httpServers?: HttpServer[];
@@ -107,6 +109,9 @@ export function createGatewayCloseHandler(params: {
     await params.configReloader.stop().catch(() => {});
     if (params.browserControl) {
       await params.browserControl.stop().catch(() => {});
+    }
+    if (params.webApp) {
+      await params.webApp.stop().catch(() => {});
     }
     await new Promise<void>((resolve) => params.wss.close(() => resolve()));
     const servers =

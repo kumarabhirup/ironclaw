@@ -1,5 +1,6 @@
 import type { UIMessage } from "ai";
 import { runAgent, type ToolResult } from "@/lib/agent-runner";
+import { resolveAgentWorkspacePrefix } from "@/lib/workspace";
 
 // Force Node.js runtime (required for child_process)
 export const runtime = "nodejs";
@@ -14,9 +15,9 @@ export const maxDuration = 600;
 function buildToolOutput(
 	result?: ToolResult,
 ): Record<string, unknown> {
-	if (!result) return {};
+	if (!result) {return {};}
 	const out: Record<string, unknown> = {};
-	if (result.text) out.text = result.text;
+	if (result.text) {out.text = result.text;}
 	if (result.details) {
 		// Forward useful details (exit code, duration, status, cwd)
 		for (const key of [
@@ -28,14 +29,15 @@ function buildToolOutput(
 			"reason",
 		]) {
 			if (result.details[key] !== undefined)
-				out[key] = result.details[key];
+				{out[key] = result.details[key];}
 		}
 	}
 	return out;
 }
 
 export async function POST(req: Request) {
-	const { messages }: { messages: UIMessage[] } = await req.json();
+	const { messages, sessionId }: { messages: UIMessage[]; sessionId?: string } =
+		await req.json();
 
 	// Extract the latest user message text
 	const lastUserMessage = messages.filter((m) => m.role === "user").pop();
@@ -49,6 +51,18 @@ export async function POST(req: Request) {
 
 	if (!userText.trim()) {
 		return new Response("No message provided", { status: 400 });
+	}
+
+	// Resolve workspace file paths to be agent-cwd-relative.
+	// Tree paths are workspace-root-relative (e.g. "knowledge/leads/foo.md"),
+	// but the agent runs from the repo root and needs "dench/knowledge/leads/foo.md".
+	let agentMessage = userText;
+	const wsPrefix = resolveAgentWorkspacePrefix();
+	if (wsPrefix) {
+		agentMessage = userText.replace(
+			/\[Context: workspace file '([^']+)'\]/,
+			`[Context: workspace file '${wsPrefix}/$1']`,
+		);
 	}
 
 	// Create a custom SSE stream using the AI SDK v6 data stream wire format.
@@ -72,10 +86,13 @@ export async function POST(req: Request) {
 			// onLifecycleEnd closes the text part (textStarted→false), so
 			// onClose can't rely on textStarted alone to detect "no output".
 			let everSentText = false;
+			// Track whether the status reasoning block is the one currently open
+			// so we can close it cleanly when real content arrives.
+			let statusReasoningActive = false;
 
 			/** Write an SSE event; silently no-ops if the stream was already cancelled. */
 			const writeEvent = (data: unknown) => {
-				if (closed) return;
+				if (closed) {return;}
 				const json = JSON.stringify(data);
 				controller.enqueue(encoder.encode(`data: ${json}\n\n`));
 			};
@@ -88,6 +105,7 @@ export async function POST(req: Request) {
 						id: currentReasoningId,
 					});
 					reasoningStarted = false;
+					statusReasoningActive = false;
 				}
 			};
 
@@ -99,9 +117,38 @@ export async function POST(req: Request) {
 				}
 			};
 
+			/** Open a status reasoning block (auto-closes any existing one). */
+			const openStatusReasoning = (label: string) => {
+				closeReasoning();
+				closeText();
+				currentReasoningId = nextId("status");
+				writeEvent({
+					type: "reasoning-start",
+					id: currentReasoningId,
+				});
+				writeEvent({
+					type: "reasoning-delta",
+					id: currentReasoningId,
+					delta: label,
+				});
+				reasoningStarted = true;
+				statusReasoningActive = true;
+			};
+
 			try {
-				await runAgent(userText, abortController.signal, {
+				await runAgent(agentMessage, abortController.signal, {
+					onLifecycleStart: () => {
+						// Show immediate feedback — the agent has started working.
+						// This eliminates the "Streaming... (silence)" gap.
+						openStatusReasoning("Preparing response...");
+					},
+
 					onThinkingDelta: (delta) => {
+						// Close the status block if it's still the active one;
+						// real reasoning content is now arriving.
+						if (statusReasoningActive) {
+							closeReasoning();
+						}
 						if (!reasoningStarted) {
 							currentReasoningId = nextId("reasoning");
 							writeEvent({
@@ -185,26 +232,75 @@ export async function POST(req: Request) {
 						}
 					},
 
+					onCompactionStart: () => {
+						// Show compaction status while the gateway is
+						// optimizing the session context (can take 10-30s).
+						openStatusReasoning("Optimizing session context...");
+					},
+
+					onCompactionEnd: (willRetry) => {
+						// Close the compaction status block. If the gateway
+						// will retry the prompt, leave the reasoning area open
+						// so the next status/thinking block follows smoothly.
+						if (statusReasoningActive) {
+							if (willRetry) {
+								// Append a note, keep block open for retry
+								writeEvent({
+									type: "reasoning-delta",
+									id: currentReasoningId,
+									delta: "\nRetrying with compacted context...",
+								});
+							} else {
+								closeReasoning();
+							}
+						}
+					},
+
 					onLifecycleEnd: () => {
 						closeReasoning();
 						closeText();
 					},
 
-					onError: (err) => {
-						console.error("[chat] Agent error:", err);
+					onAgentError: (message) => {
+						// Surface agent-level errors (API 402, rate limits, etc.)
+						// as visible text in the chat so the user sees what happened.
 						closeReasoning();
-						if (!textStarted) {
-							currentTextId = nextId("text");
-							writeEvent({
-								type: "text-start",
-								id: currentTextId,
-							});
-							textStarted = true;
-						}
+						closeText();
+
+						currentTextId = nextId("text");
+						writeEvent({
+							type: "text-start",
+							id: currentTextId,
+						});
 						writeEvent({
 							type: "text-delta",
 							id: currentTextId,
-							delta: `Error starting agent: ${err.message}`,
+							delta: `[error] ${message}`,
+						});
+						writeEvent({
+							type: "text-end",
+							id: currentTextId,
+						});
+						textStarted = false;
+						everSentText = true;
+					},
+
+					onError: (err) => {
+						console.error("[chat] Agent error:", err);
+						closeReasoning();
+						closeText();
+
+						currentTextId = nextId("text");
+						writeEvent({
+							type: "text-start",
+							id: currentTextId,
+						});
+						textStarted = true;
+						everSentText = true;
+						writeEvent({
+							type: "text-delta",
+							id: currentTextId,
+							delta: `[error] Failed to start agent: ${err.message}`,
 						});
 						writeEvent({ type: "text-end", id: currentTextId });
 						textStarted = false;
@@ -219,10 +315,14 @@ export async function POST(req: Request) {
 								type: "text-start",
 								id: currentTextId,
 							});
+							const msg =
+								_code !== null && _code !== 0
+									? `[error] Agent exited with code ${_code}. Check server logs for details.`
+									: "[error] No response from agent.";
 							writeEvent({
 								type: "text-delta",
 								id: currentTextId,
-								delta: "(No response from agent)",
+								delta: msg,
 							});
 							writeEvent({
 								type: "text-end",
@@ -233,7 +333,7 @@ export async function POST(req: Request) {
 							closeText();
 						}
 					},
-				});
+				}, sessionId ? { sessionId } : undefined);
 			} catch (error) {
 				console.error("[chat] Stream error:", error);
 				writeEvent({

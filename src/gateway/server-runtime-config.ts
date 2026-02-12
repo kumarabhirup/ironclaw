@@ -43,8 +43,13 @@ export async function resolveGatewayRuntimeConfig(params: {
   const bindMode = params.bind ?? params.cfg.gateway?.bind ?? "loopback";
   const customBindHost = params.cfg.gateway?.customBindHost;
   const bindHost = params.host ?? (await resolveGatewayBindHost(bindMode, customBindHost));
+  // webApp.enabled is the primary toggle for all web UIs.
+  // controlUi.enabled is a more specific override if set explicitly.
   const controlUiEnabled =
-    params.controlUiEnabled ?? params.cfg.gateway?.controlUi?.enabled ?? true;
+    params.controlUiEnabled ??
+    params.cfg.gateway?.controlUi?.enabled ??
+    params.cfg.gateway?.webApp?.enabled ??
+    true;
   const openAiChatCompletionsEnabled =
     params.openAiChatCompletionsEnabled ??
     params.cfg.gateway?.http?.endpoints?.chatCompletions?.enabled ??

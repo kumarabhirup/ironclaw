@@ -4,6 +4,9 @@ const nextConfig: NextConfig = {
   // Allow long-running API routes for agent streaming
   serverExternalPackages: [],
 
+  // Transpile ESM-only packages so webpack can bundle them
+  transpilePackages: ["react-markdown", "remark-gfm"],
+
   // Ensure Node.js built-ins work correctly
   webpack: (config, { isServer }) => {
     if (isServer) {

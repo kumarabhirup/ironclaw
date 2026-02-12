@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { FileManagerTree } from "./workspace/file-manager-tree";
 
 // --- Types ---
 
@@ -24,7 +25,16 @@ type MemoryFile = {
   sizeBytes: number;
 };
 
-type SidebarSection = "chats" | "skills" | "memories";
+type TreeNode = {
+  name: string;
+  path: string;
+  type: "object" | "document" | "folder" | "file" | "database" | "report";
+  icon?: string;
+  defaultView?: "table" | "kanban";
+  children?: TreeNode[];
+};
+
+type SidebarSection = "chats" | "skills" | "memories" | "workspace" | "reports";
 
 type SidebarProps = {
   onSessionSelect?: (sessionId: string) => void;
@@ -38,11 +48,11 @@ type SidebarProps = {
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
   const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 60) {return `${seconds}s ago`;}
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) {return `${minutes}m ago`;}
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) {return `${hours}h ago`;}
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 }
@@ -200,6 +210,95 @@ function MemoriesSection({
   );
 }
 
+// --- Workspace Section (uses FileManagerTree in compact mode) ---
+
+function WorkspaceSection({ tree, onRefresh }: { tree: TreeNode[]; onRefresh: () => void }) {
+  const handleSelect = useCallback((node: TreeNode) => {
+    // Navigate to workspace page for actionable items
+    if (node.type === "object" || node.type === "document" || node.type === "file" || node.type === "database" || node.type === "report") {
+      window.location.href = `/workspace?path=${encodeURIComponent(node.path)}`;
+    }
+  }, []);
+
+  if (tree.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)] px-3 py-1">
+        No workspace data yet.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5">
+      <FileManagerTree
+        tree={tree}
+        activePath={null}
+        onSelect={handleSelect}
+        onRefresh={onRefresh}
+        compact
+      />
+
+      {/* Full workspace link */}
+      <a
+        href="/workspace"
+        className="flex items-center gap-1.5 mx-2 mt-2 px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+        style={{ color: "var(--color-accent)" }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" x2="21" y1="14" y2="3" />
+        </svg>
+        Open full workspace
+      </a>
+    </div>
+  );
+}
+
+// --- Reports Section ---
+
+function ReportsSection({ tree }: { tree: TreeNode[] }) {
+  // Collect all report nodes from the tree (recursive)
+  const reports: TreeNode[] = [];
+  function collect(nodes: TreeNode[]) {
+    for (const n of nodes) {
+      if (n.type === "report") {reports.push(n);}
+      if (n.children) {collect(n.children);}
+    }
+  }
+  collect(tree);
+
+  if (reports.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)] px-3 py-1">
+        No reports yet. Ask the agent to create one.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {reports.map((report) => (
+        <a
+          key={report.path}
+          href={`/workspace?path=${encodeURIComponent(report.path)}`}
+          className="flex items-center gap-2 mx-2 px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          <span className="flex-shrink-0" style={{ color: "#22c55e" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" x2="12" y1="20" y2="10" />
+              <line x1="18" x2="18" y1="20" y2="4" />
+              <line x1="6" x2="6" y1="20" y2="14" />
+            </svg>
+          </span>
+          <span className="truncate flex-1">
+            {report.name.replace(/\.report\.json$/, "")}
+          </span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 // --- Collapsible Header ---
 
 function SectionHeader({
@@ -246,18 +345,19 @@ export function Sidebar({
   activeSessionId,
   refreshKey,
 }: SidebarProps) {
-  const [openSections, setOpenSections] = useState<Set<SidebarSection>>(new Set(["chats"]));
+  const [openSections, setOpenSections] = useState<Set<SidebarSection>>(new Set(["chats", "workspace"]));
   const [webSessions, setWebSessions] = useState<WebSession[]>([]);
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   const [mainMemory, setMainMemory] = useState<string | null>(null);
   const [dailyLogs, setDailyLogs] = useState<MemoryFile[]>([]);
+  const [workspaceTree, setWorkspaceTree] = useState<TreeNode[]>([]);
   const [loading, setLoading] = useState(true);
 
   const toggleSection = (section: SidebarSection) => {
     setOpenSections((prev) => {
       const next = new Set(prev);
-      if (next.has(section)) next.delete(section);
-      else next.add(section);
+      if (next.has(section)) {next.delete(section);}
+      else {next.add(section);}
       return next;
     });
   };
@@ -267,15 +367,17 @@ export function Sidebar({
     async function load() {
       setLoading(true);
       try {
-        const [webSessionsRes, skillsRes, memoriesRes] = await Promise.all([
+        const [webSessionsRes, skillsRes, memoriesRes, workspaceRes] = await Promise.all([
           fetch("/api/web-sessions").then((r) => r.json()),
           fetch("/api/skills").then((r) => r.json()),
           fetch("/api/memories").then((r) => r.json()),
+          fetch("/api/workspace/tree").then((r) => r.json()).catch(() => ({ tree: [] })),
         ]);
         setWebSessions(webSessionsRes.sessions ?? []);
         setSkills(skillsRes.skills ?? []);
         setMainMemory(memoriesRes.mainMemory ?? null);
         setDailyLogs(memoriesRes.dailyLogs ?? []);
+        setWorkspaceTree(workspaceRes.tree ?? []);
       } catch (err) {
         console.error("Failed to load sidebar data:", err);
       } finally {
@@ -285,13 +387,22 @@ export function Sidebar({
     load();
   }, [refreshKey]);
 
+  const refreshWorkspace = useCallback(async () => {
+    try {
+      const res = await fetch("/api/workspace/tree");
+      const data = await res.json();
+      setWorkspaceTree(data.tree ?? []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   return (
     <aside className="w-72 h-screen flex flex-col bg-[var(--color-surface)] border-r border-[var(--color-border)] overflow-hidden">
       {/* Header with New Chat button */}
       <div className="px-4 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
         <h1 className="text-base font-bold flex items-center gap-2">
-          <span className="text-xl">🦞</span>
-          <span>OpenClaw</span>
+          <span>Ironclaw</span>
         </h1>
         <button
           onClick={onNewSession}
@@ -322,8 +433,23 @@ export function Sidebar({
           </div>
         ) : (
           <>
-            {/* Chats (web sessions) */}
-            <div>
+            {/* Workspace */}
+            {workspaceTree.length > 0 && (
+              <div>
+                <SectionHeader
+                  title="Workspace"
+                  count={workspaceTree.length}
+                  isOpen={openSections.has("workspace")}
+                  onToggle={() => toggleSection("workspace")}
+                />
+                {openSections.has("workspace") && (
+                  <WorkspaceSection tree={workspaceTree} onRefresh={refreshWorkspace} />
+                )}
+              </div>
+            )}
+
+                        {/* Chats (web sessions) */}
+                        <div>
               <SectionHeader
                 title="Chats"
                 count={webSessions.length}
@@ -338,6 +464,20 @@ export function Sidebar({
                 />
               )}
             </div>
+
+            {/* Reports */}
+            {workspaceTree.length > 0 && (
+              <div>
+                <SectionHeader
+                  title="Reports"
+                  isOpen={openSections.has("reports")}
+                  onToggle={() => toggleSection("reports")}
+                />
+                {openSections.has("reports") && (
+                  <ReportsSection tree={workspaceTree} />
+                )}
+              </div>
+            )}
 
             {/* Skills */}
             <div>

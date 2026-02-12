@@ -3,6 +3,7 @@ import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { CONFIG_DIR, resolveUserPath } from "../../utils.js";
+import { resolveBundledSkillsDir } from "./bundled-dir.js";
 import { resolvePluginSkillDirs } from "./plugin-skills.js";
 
 type SkillsChangeEvent = {
@@ -29,6 +30,15 @@ export const DEFAULT_SKILLS_WATCH_IGNORED: RegExp[] = [
   /(^|[\\/])\.git([\\/]|$)/,
   /(^|[\\/])node_modules([\\/]|$)/,
   /(^|[\\/])dist([\\/]|$)/,
+  // Python virtual environments and caches
+  /(^|[\\/])\.venv([\\/]|$)/,
+  /(^|[\\/])venv([\\/]|$)/,
+  /(^|[\\/])__pycache__([\\/]|$)/,
+  /(^|[\\/])\.mypy_cache([\\/]|$)/,
+  /(^|[\\/])\.pytest_cache([\\/]|$)/,
+  // Build artifacts and caches
+  /(^|[\\/])build([\\/]|$)/,
+  /(^|[\\/])\.cache([\\/]|$)/,
 ];
 
 function bumpVersion(current: number): number {
@@ -52,6 +62,12 @@ function resolveWatchPaths(workspaceDir: string, config?: OpenClawConfig): strin
     paths.push(path.join(workspaceDir, "skills"));
   }
   paths.push(path.join(CONFIG_DIR, "skills"));
+  // Also watch the bundled skills directory so changes to repo-level skills
+  // (e.g. skills/dench/SKILL.md) trigger snapshot refreshes without a restart.
+  const bundledDir = resolveBundledSkillsDir();
+  if (bundledDir) {
+    paths.push(bundledDir);
+  }
   const extraDirsRaw = config?.skills?.load?.extraDirs ?? [];
   const extraDirs = extraDirsRaw
     .map((d) => (typeof d === "string" ? d.trim() : ""))
