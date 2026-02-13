@@ -606,7 +606,7 @@ function flattenVisible(tree: TreeNode[], expanded: Set<string>): TreeNode[] {
 
 // --- Main Exported Component ---
 
-export function FileManagerTree({ tree, activePath, onSelect, onRefresh, compact, parentDir, onNavigateUp, browseDir }: FileManagerTreeProps) {
+export function FileManagerTree({ tree, activePath, onSelect, onRefresh, compact, parentDir, onNavigateUp, browseDir: _browseDir }: FileManagerTreeProps) {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -934,10 +934,10 @@ export function FileManagerTree({ tree, activePath, onSelect, onRefresh, compact
           if (e.metaKey || e.ctrlKey) {
             if (e.key === "c" && curNode) {
               e.preventDefault();
-              navigator.clipboard.writeText(curNode.path);
+              void navigator.clipboard.writeText(curNode.path);
             } else if (e.key === "d" && curNode && !isSystemFile(curNode.path)) {
               e.preventDefault();
-              apiDuplicate(curNode.path).then(() => onRefresh());
+              void apiDuplicate(curNode.path).then(() => onRefresh());
             } else if (e.key === "n") {
               e.preventDefault();
               const parent = curNode

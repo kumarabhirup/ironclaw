@@ -75,6 +75,85 @@ export function CronRunChat({ sessionId }: { sessionId: string }) {
   );
 }
 
+/* ─── Transcript search fallback (no sessionId) ─── */
+
+export function CronRunTranscriptSearch({
+  jobId,
+  runAtMs,
+  summary,
+  fallback,
+}: {
+  jobId: string;
+  runAtMs?: number;
+  summary?: string;
+  fallback?: React.ReactNode;
+}) {
+  const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+
+  const fetchTranscript = useCallback(async () => {
+    if (!runAtMs || !summary) {
+      setLoading(false);
+      setNotFound(true);
+      return;
+    }
+    try {
+      const params = new URLSearchParams({
+        jobId,
+        runAtMs: String(runAtMs),
+        summary,
+      });
+      const res = await fetch(`/api/cron/runs/search-transcript?${params}`);
+      if (!res.ok) {
+        setNotFound(true);
+        return;
+      }
+      const data = await res.json() as { messages?: SessionMessage[] };
+      if (data.messages && data.messages.length > 0) {
+        setMessages(data.messages);
+      } else {
+        setNotFound(true);
+      }
+    } catch {
+      setNotFound(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [jobId, runAtMs, summary]);
+
+  useEffect(() => {
+    fetchTranscript();
+  }, [fetchTranscript]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-4">
+        <div
+          className="w-4 h-4 border-[1.5px] rounded-full animate-spin"
+          style={{ borderColor: "var(--color-border)", borderTopColor: "var(--color-accent)" }}
+        />
+        <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>Searching for transcript...</span>
+      </div>
+    );
+  }
+
+  if (notFound || messages.length === 0) {
+    return <>{fallback}</>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] uppercase tracking-wider font-medium mb-2" style={{ color: "var(--color-text-muted)" }}>
+        Session Transcript
+      </div>
+      {messages.map((msg) => (
+        <CronChatMessage key={msg.id} message={msg} />
+      ))}
+    </div>
+  );
+}
+
 /* ─── Message rendering ─── */
 
 function CronChatMessage({ message }: { message: SessionMessage }) {

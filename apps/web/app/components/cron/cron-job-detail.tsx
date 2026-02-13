@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CronJob, CronRunLogEntry, CronRunsResponse } from "../../types/cron";
-import { CronRunChat } from "./cron-run-chat";
+import { CronRunChat, CronRunTranscriptSearch } from "./cron-run-chat";
 
 /* ─── Helpers ─── */
 
@@ -75,7 +75,7 @@ export function CronJobDetail({
   }, [job.id]);
 
   useEffect(() => {
-    fetchRuns();
+    void fetchRuns();
     const id = setInterval(fetchRuns, 15_000);
     return () => clearInterval(id);
   }, [fetchRuns]);
@@ -379,36 +379,52 @@ function RunCard({
             </div>
           )}
 
-          {/* Session transcript (full chat) or summary fallback */}
+          {/* Session transcript */}
           {run.sessionId ? (
             <div className="mt-4">
               <CronRunChat sessionId={run.sessionId} />
             </div>
-          ) : run.summary ? (
-            <div className="mt-3">
-              <div
-                className="text-[11px] uppercase tracking-wider font-medium mb-2"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                Run Output
-              </div>
-              <div
-                className="chat-prose text-sm"
-                style={{ color: "var(--color-text)" }}
-              >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {run.summary}
-                </ReactMarkdown>
-              </div>
-            </div>
           ) : (
-            <div className="mt-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
-              No output recorded for this run.
+            <div className="mt-4">
+              <RunTranscriptOrSummary run={run} />
             </div>
           )}
         </div>
       )}
     </div>
+  );
+}
+
+/* ─── Transcript search with summary fallback ─── */
+
+function RunTranscriptOrSummary({ run }: { run: CronRunLogEntry }) {
+  const summaryFallback = run.summary ? (
+    <div>
+      <div
+        className="text-[11px] uppercase tracking-wider font-medium mb-2"
+        style={{ color: "var(--color-text-muted)" }}
+      >
+        Run Output
+      </div>
+      <div className="chat-prose text-sm" style={{ color: "var(--color-text)" }}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {run.summary}
+        </ReactMarkdown>
+      </div>
+    </div>
+  ) : (
+    <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+      No output recorded for this run.
+    </div>
+  );
+
+  return (
+    <CronRunTranscriptSearch
+      jobId={run.jobId}
+      runAtMs={run.runAtMs}
+      summary={run.summary}
+      fallback={summaryFallback}
+    />
   );
 }
 

@@ -24,9 +24,10 @@ export function useWorkspaceWatcher() {
   const [exists, setExists] = useState(false);
 
   // Browse mode state
-  const [browseDir, setBrowseDir] = useState<string | null>(null);
+  const [browseDirRaw, setBrowseDirRaw] = useState<string | null>(null);
   const [parentDir, setParentDir] = useState<string | null>(null);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  const [openclawDir, setOpenclawDir] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
   const retryDelayRef = useRef(1000);
@@ -40,6 +41,7 @@ export function useWorkspaceWatcher() {
         setTree(data.tree ?? []);
         setExists(data.exists ?? false);
         setWorkspaceRoot(data.workspaceRoot ?? null);
+        setOpenclawDir(data.openclawDir ?? null);
         setLoading(false);
       }
     } catch {
@@ -64,24 +66,38 @@ export function useWorkspaceWatcher() {
     }
   }, []);
 
+  // Smart setBrowseDir: auto-return to workspace mode when navigating to the
+  // workspace root, so all virtual folders (Chats, Cron, etc.) and DuckDB
+  // object detection are restored.
+  const setBrowseDir = useCallback((dir: string | null) => {
+    if (dir != null && workspaceRoot && dir === workspaceRoot) {
+      setBrowseDirRaw(null);
+    } else {
+      setBrowseDirRaw(dir);
+    }
+  }, [workspaceRoot]);
+
+  // Expose the raw value for reads
+  const browseDir = browseDirRaw;
+
   // Unified fetch based on current mode
   const fetchTree = useCallback(async () => {
-    if (browseDir) {
-      await fetchBrowseTree(browseDir);
+    if (browseDirRaw) {
+      await fetchBrowseTree(browseDirRaw);
     } else {
       await fetchWorkspaceTree();
     }
-  }, [browseDir, fetchBrowseTree, fetchWorkspaceTree]);
+  }, [browseDirRaw, fetchBrowseTree, fetchWorkspaceTree]);
 
   // Manual refresh for use after mutations
   const refresh = useCallback(() => {
-    fetchTree();
+    void fetchTree();
   }, [fetchTree]);
 
   // Re-fetch when browseDir changes
   useEffect(() => {
     mountedRef.current = true;
-    fetchTree();
+    void fetchTree();
     return () => {
       mountedRef.current = false;
     };
@@ -89,7 +105,7 @@ export function useWorkspaceWatcher() {
 
   // SSE subscription -- only active in workspace mode (not browse mode)
   useEffect(() => {
-    if (browseDir) {return;}
+    if (browseDirRaw) {return;}
 
     let eventSource: EventSource | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -101,7 +117,7 @@ export function useWorkspaceWatcher() {
     function debouncedRefetch() {
       if (debounceTimer) {clearTimeout(debounceTimer);}
       debounceTimer = setTimeout(() => {
-        if (alive) {fetchWorkspaceTree();}
+        if (alive) {void fetchWorkspaceTree();}
       }, 300);
     }
 
@@ -131,12 +147,6 @@ export function useWorkspaceWatcher() {
           eventSource = null;
           scheduleReconnect();
         });
-
-        eventSource.onerror = () => {
-          eventSource?.close();
-          eventSource = null;
-          scheduleReconnect();
-        };
       } catch {
         // SSE not supported or network error -- fall back to polling
         startPolling();
@@ -161,7 +171,7 @@ export function useWorkspaceWatcher() {
     function startPolling() {
       if (pollInterval || !alive) {return;}
       pollInterval = setInterval(() => {
-        if (alive) {fetchWorkspaceTree();}
+        if (alive) {void fetchWorkspaceTree();}
       }, 5000);
     }
 
@@ -174,7 +184,7 @@ export function useWorkspaceWatcher() {
       if (reconnectTimeout) {clearTimeout(reconnectTimeout);}
       if (debounceTimer) {clearTimeout(debounceTimer);}
     };
-  }, [browseDir, fetchWorkspaceTree]);
+  }, [browseDirRaw, fetchWorkspaceTree]);
 
-  return { tree, loading, exists, refresh, browseDir, setBrowseDir, parentDir, workspaceRoot };
+  return { tree, loading, exists, refresh, browseDir, setBrowseDir, parentDir, workspaceRoot, openclawDir };
 }

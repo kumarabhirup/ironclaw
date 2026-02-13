@@ -302,6 +302,8 @@ function buildMemoriesVirtualFolder(): TreeNode | null {
 }
 
 export async function GET() {
+  const home = homedir();
+  const openclawDir = join(home, ".openclaw");
   const root = resolveDenchRoot();
   if (!root) {
     // Even without a dench workspace, return virtual folders if they exist
@@ -311,7 +313,7 @@ export async function GET() {
     if (skillsFolder) {tree.push(skillsFolder);}
     const memoriesFolder = buildMemoriesVirtualFolder();
     if (memoriesFolder) {tree.push(memoriesFolder);}
-    return Response.json({ tree, exists: false, workspaceRoot: null });
+    return Response.json({ tree, exists: false, workspaceRoot: null, openclawDir });
   }
 
   // Load objects from DuckDB for smart directory detection
@@ -332,5 +334,5 @@ export async function GET() {
   const memoriesFolder = buildMemoriesVirtualFolder();
   if (memoriesFolder) {tree.push(memoriesFolder);}
 
-  return Response.json({ tree, exists: true, workspaceRoot: root });
+  return Response.json({ tree, exists: true, workspaceRoot: root, openclawDir });
 }

@@ -13,6 +13,330 @@ import {
 } from "react";
 import { ChatMessage } from "./chat-message";
 
+// ── Attachment types & helpers ──
+
+type AttachedFile = {
+	id: string;
+	file: File;
+	/** Full filesystem path when available (Electron/Chromium), otherwise filename. */
+	path: string;
+	previewUrl: string | null;
+};
+
+function getFileCategory(
+	file: File,
+): "image" | "video" | "audio" | "pdf" | "code" | "document" | "other" {
+	const mime = file.type;
+	if (mime.startsWith("image/")) {return "image";}
+	if (mime.startsWith("video/")) {return "video";}
+	if (mime.startsWith("audio/")) {return "audio";}
+	if (mime === "application/pdf") {return "pdf";}
+	const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+	if (
+		[
+			"js", "ts", "tsx", "jsx", "py", "rb", "go", "rs", "java",
+			"cpp", "c", "h", "css", "html", "json", "yaml", "yml",
+			"toml", "md", "sh", "bash", "sql", "swift", "kt",
+		].includes(ext)
+	)
+		{return "code";}
+	if (
+		[
+			"doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt",
+			"rtf", "csv", "pages", "numbers", "key",
+		].includes(ext)
+	)
+		{return "document";}
+	return "other";
+}
+
+function formatFileSize(bytes: number): string {
+	if (bytes < 1024) {return bytes + " B";}
+	if (bytes < 1024 * 1024) {return (bytes / 1024).toFixed(1) + " KB";}
+	return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+const categoryMeta: Record<string, { bg: string; fg: string }> = {
+	image: { bg: "rgba(16, 185, 129, 0.12)", fg: "#10b981" },
+	video: { bg: "rgba(139, 92, 246, 0.12)", fg: "#8b5cf6" },
+	audio: { bg: "rgba(245, 158, 11, 0.12)", fg: "#f59e0b" },
+	pdf: { bg: "rgba(239, 68, 68, 0.12)", fg: "#ef4444" },
+	code: { bg: "rgba(59, 130, 246, 0.12)", fg: "#3b82f6" },
+	document: { bg: "rgba(107, 114, 128, 0.12)", fg: "#6b7280" },
+	other: { bg: "rgba(107, 114, 128, 0.08)", fg: "#9ca3af" },
+};
+
+function FileTypeIcon({ category }: { category: string }) {
+	const props = {
+		width: 16,
+		height: 16,
+		viewBox: "0 0 24 24",
+		fill: "none",
+		stroke: "currentColor",
+		strokeWidth: 2,
+		strokeLinecap: "round" as const,
+		strokeLinejoin: "round" as const,
+	};
+	switch (category) {
+		case "image":
+			return (
+				<svg {...props}>
+					<rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+					<circle cx="9" cy="9" r="2" />
+					<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+				</svg>
+			);
+		case "video":
+			return (
+				<svg {...props}>
+					<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" />
+					<rect x="2" y="6" width="14" height="12" rx="2" />
+				</svg>
+			);
+		case "audio":
+			return (
+				<svg {...props}>
+					<path d="M9 18V5l12-2v13" />
+					<circle cx="6" cy="18" r="3" />
+					<circle cx="18" cy="16" r="3" />
+				</svg>
+			);
+		case "pdf":
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+					<path d="M10 13h4" />
+					<path d="M10 17h4" />
+				</svg>
+			);
+		case "code":
+			return (
+				<svg {...props}>
+					<polyline points="16 18 22 12 16 6" />
+					<polyline points="8 6 2 12 8 18" />
+				</svg>
+			);
+		case "document":
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+					<path d="M16 13H8" />
+					<path d="M16 17H8" />
+					<path d="M10 9H8" />
+				</svg>
+			);
+		default:
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+				</svg>
+			);
+	}
+}
+
+function AttachmentStrip({
+	files,
+	compact,
+	onRemove,
+	onClearAll,
+}: {
+	files: AttachedFile[];
+	compact?: boolean;
+	onRemove: (id: string) => void;
+	onClearAll: () => void;
+}) {
+	if (files.length === 0) {return null;}
+
+	return (
+		<div className={`${compact ? "px-2" : "px-3"} pb-2`}>
+			<div className="flex items-center justify-between mb-1.5">
+				<span
+					className="text-[10px] font-medium uppercase tracking-wider"
+					style={{ color: "var(--color-text-muted)" }}
+				>
+					{files.length}{" "}
+					{files.length === 1 ? "file" : "files"} attached
+				</span>
+				{files.length > 1 && (
+					<button
+						type="button"
+						onClick={onClearAll}
+						className="text-[10px] font-medium px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
+						style={{ color: "var(--color-text-muted)" }}
+					>
+						Clear all
+					</button>
+				)}
+			</div>
+			<div
+				className="flex gap-2 overflow-x-auto pb-1"
+				style={{ scrollbarWidth: "thin" }}
+			>
+				{files.map((af) => {
+					const category = getFileCategory(af.file);
+					const meta =
+						categoryMeta[category] ??
+						categoryMeta.other;
+					const isMedia =
+						(category === "image" ||
+							category === "video") &&
+						af.previewUrl;
+
+					return (
+						<div
+							key={af.id}
+							className="relative group flex-shrink-0 rounded-xl overflow-hidden"
+							style={{
+								background:
+									"var(--color-surface-hover)",
+								border: "1px solid var(--color-border)",
+							}}
+						>
+							{/* Remove button */}
+							<button
+								type="button"
+								onClick={() => onRemove(af.id)}
+								className="absolute top-1 right-1 z-10 w-[18px] h-[18px] rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+								style={{
+									background:
+										"rgba(0,0,0,0.55)",
+									color: "white",
+									backdropFilter:
+										"blur(4px)",
+								}}
+							>
+								<svg
+									width="8"
+									height="8"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="3"
+									strokeLinecap="round"
+								>
+									<path d="M18 6 6 18" />
+									<path d="m6 6 12 12" />
+								</svg>
+							</button>
+
+							{isMedia ? (
+								<div>
+									{category === "image" ? (
+										/* eslint-disable-next-line @next/next/no-img-element */
+										<img
+											src={
+												af.previewUrl!
+											}
+											alt={
+												af.file
+													.name
+											}
+											className="w-[100px] h-[64px] object-cover"
+										/>
+									) : (
+										<div className="relative w-[100px] h-[64px]">
+											<video
+												src={
+													af.previewUrl!
+												}
+												className="w-full h-full object-cover"
+												muted
+												preload="metadata"
+											/>
+											<div className="absolute inset-0 flex items-center justify-center bg-black/20">
+												<div className="w-6 h-6 rounded-full bg-black/50 flex items-center justify-center backdrop-blur-sm">
+													<svg
+														width="10"
+														height="10"
+														viewBox="0 0 24 24"
+														fill="white"
+													>
+														<polygon points="5 3 19 12 5 21 5 3" />
+													</svg>
+												</div>
+											</div>
+										</div>
+									)}
+									<div className="px-2 py-1.5">
+										<p
+											className="text-[10px] font-medium truncate w-[84px]"
+											style={{
+												color: "var(--color-text)",
+											}}
+											title={
+												af.file
+													.name
+											}
+										>
+											{af.file.name}
+										</p>
+										<p
+											className="text-[9px]"
+											style={{
+												color: "var(--color-text-muted)",
+											}}
+										>
+											{formatFileSize(
+												af.file
+													.size,
+											)}
+										</p>
+									</div>
+								</div>
+							) : (
+								<div className="flex items-center gap-2.5 px-3 py-2.5">
+									<div
+										className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+										style={{
+											background:
+												meta.bg,
+											color: meta.fg,
+										}}
+									>
+										<FileTypeIcon
+											category={
+												category
+											}
+										/>
+									</div>
+									<div className="min-w-0 max-w-[120px]">
+										<p
+											className="text-[11px] font-medium truncate"
+											style={{
+												color: "var(--color-text)",
+											}}
+											title={
+												af.file
+													.name
+											}
+										>
+											{af.file.name}
+										</p>
+										<p
+											className="text-[9px]"
+											style={{
+												color: "var(--color-text-muted)",
+											}}
+										>
+											{formatFileSize(
+												af.file
+													.size,
+											)}
+										</p>
+									</div>
+								</div>
+							)}
+						</div>
+					);
+				})}
+			</div>
+		</div>
+	);
+}
+
 // ── SSE stream parser for reconnection ──
 // Converts raw SSE events (AI SDK v6 wire format) into UIMessage parts.
 
@@ -196,6 +520,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 		const [loadingSession, setLoadingSession] = useState(false);
 		const [startingNewSession, setStartingNewSession] = useState(false);
 		const messagesEndRef = useRef<HTMLDivElement>(null);
+
+		// ── Attachment state ──
+		const [attachedFiles, setAttachedFiles] = useState<
+			AttachedFile[]
+		>([]);
+		const fileInputRef = useRef<HTMLInputElement>(null);
 
 		// ── Reconnection state ──
 		const [isReconnecting, setIsReconnecting] = useState(false);
@@ -552,12 +882,24 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 
 		const handleSubmit = async (e: React.FormEvent) => {
 			e.preventDefault();
-			if (!input.trim() || isStreaming) {
+			const hasText = input.trim().length > 0;
+			const hasFiles = attachedFiles.length > 0;
+			if ((!hasText && !hasFiles) || isStreaming) {
 				return;
 			}
 
 			const userText = input.trim();
+			const currentAttachments = [...attachedFiles];
 			setInput("");
+
+			// Clear attachments and revoke preview URLs
+			if (currentAttachments.length > 0) {
+				for (const f of currentAttachments) {
+					if (f.previewUrl)
+						{URL.revokeObjectURL(f.previewUrl);}
+				}
+				setAttachedFiles([]);
+			}
 
 			if (userText.toLowerCase() === "/new") {
 				handleNewSession();
@@ -566,10 +908,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 
 			let sessionId = currentSessionId;
 			if (!sessionId) {
+				const titleSource =
+					userText || "File attachment";
 				const title =
-					userText.length > 60
-						? userText.slice(0, 60) + "..."
-						: userText;
+					titleSource.length > 60
+						? titleSource.slice(0, 60) + "..."
+						: titleSource;
 				sessionId = await createSession(title);
 				setCurrentSessionId(sessionId);
 				sessionIdRef.current = sessionId;
@@ -585,9 +929,20 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				}
 			}
 
+			// Build message with optional attachment prefix
 			let messageText = userText;
+			if (currentAttachments.length > 0) {
+				const filePaths = currentAttachments
+					.map((f) => f.path)
+					.join(", ");
+				const prefix = `[Attached files: ${filePaths}]`;
+				messageText = messageText
+					? `${prefix}\n\n${messageText}`
+					: prefix;
+			}
+
 			if (fileContext && isFirstFileMessageRef.current) {
-				messageText = `[Context: workspace file '${fileContext.path}']\n\n${userText}`;
+				messageText = `[Context: workspace file '${fileContext.path}']\n\n${messageText}`;
 				isFirstFileMessageRef.current = false;
 			}
 
@@ -734,6 +1089,73 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 			// Stop the useChat transport stream
 			stop();
 		}, [currentSessionId, stop]);
+
+		// ── Attachment handlers ──
+
+		const handleFileSelect = useCallback(
+			(e: React.ChangeEvent<HTMLInputElement>) => {
+				const files = e.target.files;
+				if (!files || files.length === 0) {return;}
+
+				const newFiles: AttachedFile[] = Array.from(
+					files,
+				).map((file) => {
+					const cat = getFileCategory(file);
+					const previewUrl =
+						cat === "image" || cat === "video"
+							? URL.createObjectURL(file)
+							: null;
+					// Chromium/Electron exposes the full filesystem path
+					const fullPath =
+						(file as File & { path?: string })
+							.path ||
+						file.webkitRelativePath ||
+						file.name;
+					return {
+						id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+						file,
+						path: fullPath,
+						previewUrl,
+					};
+				});
+
+				setAttachedFiles((prev) => [...prev, ...newFiles]);
+				e.target.value = "";
+			},
+			[],
+		);
+
+		const removeAttachment = useCallback((id: string) => {
+			setAttachedFiles((prev) => {
+				const found = prev.find((f) => f.id === id);
+				if (found?.previewUrl) {
+					URL.revokeObjectURL(found.previewUrl);
+				}
+				return prev.filter((f) => f.id !== id);
+			});
+		}, []);
+
+		const clearAllAttachments = useCallback(() => {
+			setAttachedFiles((prev) => {
+				for (const f of prev) {
+					if (f.previewUrl)
+						{URL.revokeObjectURL(f.previewUrl);}
+				}
+				return [];
+			});
+		}, []);
+
+		// Cleanup preview URLs on unmount
+		const attachedFilesRef = useRef(attachedFiles);
+		attachedFilesRef.current = attachedFiles;
+		useEffect(() => {
+			return () => {
+				for (const f of attachedFilesRef.current) {
+					if (f.previewUrl)
+						{URL.revokeObjectURL(f.previewUrl);}
+				}
+			};
+		}, []);
 
 		// ── Status label ──
 
@@ -1030,11 +1452,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 									onChange={(e) =>
 										setInput(e.target.value)
 									}
-									placeholder={
-										compact && fileContext
-											? `Ask about ${fileContext.filename}...`
+								placeholder={
+									compact && fileContext
+										? `Ask about ${fileContext.filename}...`
+										: attachedFiles.length >
+												0
+											? "Add a message or send files..."
 											: "Ask anything..."
-									}
+								}
 									disabled={
 										isStreaming ||
 										loadingSession ||
@@ -1045,21 +1470,48 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 										color: "var(--color-text)",
 									}}
 								/>
-							</form>
-							{/* Toolbar row */}
+						</form>
+
+						{/* Attachment preview strip */}
+						<AttachmentStrip
+							files={attachedFiles}
+							compact={compact}
+							onRemove={removeAttachment}
+							onClearAll={
+								clearAllAttachments
+							}
+						/>
+
+						{/* Toolbar row */}
 							<div
 								className={`flex items-center justify-between ${compact ? "px-2 pb-1.5" : "px-3 pb-2.5"}`}
 							>
-								<div className="flex items-center gap-0.5">
-									{/* Placeholder toolbar icons */}
-									<button
-										type="button"
-										className="p-1.5 rounded-lg"
-										style={{
-											color: "var(--color-text-muted)",
-										}}
-										title="Attach"
-									>
+							<div className="flex items-center gap-0.5">
+								{/* File input (hidden) */}
+								<input
+									ref={fileInputRef}
+									type="file"
+									multiple
+									className="hidden"
+									onChange={
+										handleFileSelect
+									}
+								/>
+								<button
+									type="button"
+									onClick={() =>
+										fileInputRef.current?.click()
+									}
+									className="p-1.5 rounded-lg hover:opacity-80 transition-opacity"
+									style={{
+										color:
+											attachedFiles.length >
+											0
+												? "var(--color-accent)"
+												: "var(--color-text-muted)",
+									}}
+									title="Attach files"
+								>
 										<svg
 											width="16"
 											height="16"
@@ -1074,24 +1526,28 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 										</svg>
 									</button>
 								</div>
-								{/* Send button */}
-								<button
-									type="submit"
-									onClick={handleSubmit}
-									disabled={
-										!input.trim() ||
-										isStreaming ||
-										loadingSession ||
-										startingNewSession
-									}
-									className={`${compact ? "w-6 h-6" : "w-7 h-7"} rounded-full flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed`}
-									style={{
-										background:
-											input.trim()
-												? "var(--color-accent)"
-												: "var(--color-border-strong)",
-										color: "white",
-									}}
+							{/* Send button */}
+							<button
+								type="submit"
+								onClick={handleSubmit}
+								disabled={
+									(!input.trim() &&
+										attachedFiles.length ===
+											0) ||
+									isStreaming ||
+									loadingSession ||
+									startingNewSession
+								}
+								className={`${compact ? "w-6 h-6" : "w-7 h-7"} rounded-full flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed`}
+								style={{
+									background:
+										input.trim() ||
+										attachedFiles.length >
+											0
+											? "var(--color-accent)"
+											: "var(--color-border-strong)",
+									color: "white",
+								}}
 								>
 									{isStreaming ? (
 										<div

@@ -153,6 +153,245 @@ function asRecord(
 	return undefined;
 }
 
+/* ─── Attachment parsing for sent messages ─── */
+
+function parseAttachments(
+	text: string,
+): { paths: string[]; message: string } | null {
+	const match = text.match(/\[Attached files: (.+?)\]/);
+	if (!match) {return null;}
+	const afterIdx = (match.index ?? 0) + match[0].length;
+	const message = text.slice(afterIdx).trim();
+	const paths = match[1]
+		.split(", ")
+		.map((p) => p.trim())
+		.filter(Boolean);
+	return { paths, message };
+}
+
+function getCategoryFromPath(
+	filePath: string,
+): "image" | "video" | "audio" | "pdf" | "code" | "document" | "other" {
+	const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+	if (
+		[
+			"jpg", "jpeg", "png", "gif", "webp", "svg", "bmp",
+			"ico", "tiff", "heic",
+		].includes(ext)
+	)
+		{return "image";}
+	if (["mp4", "webm", "mov", "avi", "mkv", "flv"].includes(ext))
+		{return "video";}
+	if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext))
+		{return "audio";}
+	if (ext === "pdf") {return "pdf";}
+	if (
+		[
+			"js", "ts", "tsx", "jsx", "py", "rb", "go", "rs",
+			"java", "cpp", "c", "h", "css", "html", "json",
+			"yaml", "yml", "toml", "md", "sh", "bash", "sql",
+			"swift", "kt",
+		].includes(ext)
+	)
+		{return "code";}
+	if (
+		[
+			"doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt",
+			"rtf", "csv", "pages", "numbers", "key",
+		].includes(ext)
+	)
+		{return "document";}
+	return "other";
+}
+
+function shortenPath(path: string): string {
+	return path
+		.replace(/^\/Users\/[^/]+/, "~")
+		.replace(/^\/home\/[^/]+/, "~")
+		.replace(/^[A-Z]:\\Users\\[^\\]+/, "~");
+}
+
+const attachCategoryMeta: Record<string, { bg: string; fg: string }> = {
+	image: { bg: "rgba(16, 185, 129, 0.15)", fg: "#10b981" },
+	video: { bg: "rgba(139, 92, 246, 0.15)", fg: "#8b5cf6" },
+	audio: { bg: "rgba(245, 158, 11, 0.15)", fg: "#f59e0b" },
+	pdf: { bg: "rgba(239, 68, 68, 0.15)", fg: "#ef4444" },
+	code: { bg: "rgba(59, 130, 246, 0.15)", fg: "#3b82f6" },
+	document: { bg: "rgba(107, 114, 128, 0.15)", fg: "#6b7280" },
+	other: { bg: "rgba(107, 114, 128, 0.10)", fg: "#9ca3af" },
+};
+
+function AttachFileIcon({ category }: { category: string }) {
+	const props = {
+		width: 14,
+		height: 14,
+		viewBox: "0 0 24 24",
+		fill: "none",
+		stroke: "currentColor",
+		strokeWidth: 2,
+		strokeLinecap: "round" as const,
+		strokeLinejoin: "round" as const,
+	};
+	switch (category) {
+		case "image":
+			return (
+				<svg {...props}>
+					<rect
+						width="18"
+						height="18"
+						x="3"
+						y="3"
+						rx="2"
+						ry="2"
+					/>
+					<circle cx="9" cy="9" r="2" />
+					<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+				</svg>
+			);
+		case "video":
+			return (
+				<svg {...props}>
+					<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" />
+					<rect x="2" y="6" width="14" height="12" rx="2" />
+				</svg>
+			);
+		case "audio":
+			return (
+				<svg {...props}>
+					<path d="M9 18V5l12-2v13" />
+					<circle cx="6" cy="18" r="3" />
+					<circle cx="18" cy="16" r="3" />
+				</svg>
+			);
+		case "pdf":
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+					<path d="M10 13h4" />
+					<path d="M10 17h4" />
+				</svg>
+			);
+		case "code":
+			return (
+				<svg {...props}>
+					<polyline points="16 18 22 12 16 6" />
+					<polyline points="8 6 2 12 8 18" />
+				</svg>
+			);
+		case "document":
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+					<path d="M16 13H8" />
+					<path d="M16 17H8" />
+					<path d="M10 9H8" />
+				</svg>
+			);
+		default:
+			return (
+				<svg {...props}>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+				</svg>
+			);
+	}
+}
+
+function AttachedFilesCard({ paths }: { paths: string[] }) {
+	return (
+		<div className="mb-2">
+			<div className="flex items-center gap-1.5 mb-2">
+				<svg
+					width="12"
+					height="12"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					strokeWidth="2"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+					style={{ opacity: 0.5 }}
+				>
+					<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+				</svg>
+				<span
+					className="text-[11px] font-medium uppercase tracking-wider"
+					style={{ opacity: 0.5 }}
+				>
+					{paths.length}{" "}
+					{paths.length === 1 ? "file" : "files"}{" "}
+					attached
+				</span>
+			</div>
+			<div className="flex flex-wrap gap-1.5">
+				{paths.map((filePath, i) => {
+					const category =
+						getCategoryFromPath(filePath);
+					const filename =
+						filePath.split("/").pop() ??
+						filePath;
+					const meta =
+						attachCategoryMeta[category] ??
+						attachCategoryMeta.other;
+					const short = shortenPath(filePath);
+
+					return (
+						<div
+							key={i}
+							className="flex-shrink-0 rounded-lg"
+							style={{
+								background:
+									"rgba(0,0,0,0.04)",
+								border: "1px solid rgba(0,0,0,0.06)",
+							}}
+						>
+							<div className="flex items-center gap-2 px-2.5 py-1.5">
+								<div
+									className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
+									style={{
+										background:
+											meta.bg,
+										color: meta.fg,
+									}}
+								>
+									<AttachFileIcon
+										category={
+											category
+										}
+									/>
+								</div>
+								<div className="min-w-0">
+									<p
+										className="text-[12px] font-medium truncate max-w-[160px]"
+										title={
+											filePath
+										}
+									>
+										{filename}
+									</p>
+									<p
+										className="text-[10px] truncate max-w-[160px]"
+										style={{
+											opacity: 0.45,
+										}}
+										title={
+											filePath
+										}
+									>
+										{short}
+									</p>
+								</div>
+							</div>
+						</div>
+					);
+				})}
+			</div>
+		</div>
+	);
+}
+
 /* ─── Markdown component overrides for chat ─── */
 
 const mdComponents: Components = {
@@ -195,6 +434,9 @@ export function ChatMessage({ message }: { message: UIMessage }) {
 			.map((s) => s.text)
 			.join("\n");
 
+		// Parse attachment prefix from sent messages
+		const attachmentInfo = parseAttachments(textContent);
+
 		return (
 			<div className="flex justify-end py-2">
 				<div
@@ -204,7 +446,26 @@ export function ChatMessage({ message }: { message: UIMessage }) {
 						color: "var(--color-user-bubble-text)",
 					}}
 				>
-					<p className="whitespace-pre-wrap">{textContent}</p>
+					{attachmentInfo ? (
+						<>
+							<AttachedFilesCard
+								paths={
+									attachmentInfo.paths
+								}
+							/>
+							{attachmentInfo.message && (
+								<p className="whitespace-pre-wrap">
+									{
+										attachmentInfo.message
+									}
+								</p>
+							)}
+						</>
+					) : (
+						<p className="whitespace-pre-wrap">
+							{textContent}
+						</p>
+					)}
 				</div>
 			</div>
 		);

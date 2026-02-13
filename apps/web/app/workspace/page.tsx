@@ -217,7 +217,7 @@ function WorkspacePageInner() {
   // Live-reactive tree via SSE watcher (with browse-mode support)
   const {
     tree, loading: treeLoading, exists: workspaceExists, refresh: refreshTree,
-    browseDir, setBrowseDir, parentDir: browseParentDir, workspaceRoot,
+    browseDir, setBrowseDir, parentDir: browseParentDir, workspaceRoot, openclawDir,
   } = useWorkspaceWatcher();
 
   // Search index for @ mention fuzzy search (files + entries)
@@ -276,7 +276,7 @@ function WorkspacePageInner() {
         // ignore
       }
     }
-    loadContext();
+    void loadContext();
     return () => { cancelled = true; };
   }, []);
 
@@ -292,7 +292,7 @@ function WorkspacePageInner() {
   }, []);
 
   useEffect(() => {
-    fetchSessions();
+    void fetchSessions();
   }, [fetchSessions, sidebarRefreshKey]);
 
   const refreshSessions = useCallback(() => {
@@ -311,7 +311,7 @@ function WorkspacePageInner() {
   }, []);
 
   useEffect(() => {
-    fetchCronJobs();
+    void fetchCronJobs();
     const id = setInterval(fetchCronJobs, 30_000);
     return () => clearInterval(id);
   }, [fetchCronJobs]);
@@ -377,13 +377,43 @@ function WorkspacePageInner() {
 
   const handleNodeSelect = useCallback(
     (node: TreeNode) => {
+      // --- Browse-mode: detect special OpenClaw directories ---
+      // When the user clicks a known OpenClaw folder while browsing the
+      // filesystem, switch back to workspace mode or show the appropriate
+      // dashboard instead of showing raw files.
+      if (browseDir && isAbsolutePath(node.path)) {
+        // Clicking the dench workspace root → restore full workspace mode
+        if (workspaceRoot && node.path === workspaceRoot) {
+          setBrowseDir(null);
+          return;
+        }
+        if (openclawDir) {
+          // Clicking the cron directory → show cron dashboard
+          if (node.path === openclawDir + "/cron") {
+            setBrowseDir(null);
+            setActivePath("~cron");
+            setContent({ kind: "cron-dashboard" });
+            return;
+          }
+          // Clicking the web-chat directory → switch to workspace mode & open chats
+          if (node.path === openclawDir + "/web-chat") {
+            setBrowseDir(null);
+            setActivePath(null);
+            setContent({ kind: "none" });
+            void chatRef.current?.newSession();
+            return;
+          }
+        }
+      }
+
+      // --- Virtual path handlers (workspace mode) ---
       // Intercept chat folder item clicks
       if (node.path.startsWith("~chats/")) {
         const sessionId = node.path.slice("~chats/".length);
         setActivePath(null);
         setContent({ kind: "none" });
         setActiveSessionId(sessionId);
-        chatRef.current?.loadSession(sessionId);
+        void chatRef.current?.loadSession(sessionId);
         // URL is synced by the activeSessionId effect
         return;
       }
@@ -391,7 +421,7 @@ function WorkspacePageInner() {
       if (node.path === "~chats") {
         setActivePath(null);
         setContent({ kind: "none" });
-        chatRef.current?.newSession();
+        void chatRef.current?.newSession();
         router.replace("/workspace", { scroll: false });
         return;
       }
@@ -413,9 +443,9 @@ function WorkspacePageInner() {
         router.replace("/workspace", { scroll: false });
         return;
       }
-      loadContent(node);
+      void loadContent(node);
     },
-    [loadContent, router, cronJobs],
+    [loadContent, router, cronJobs, browseDir, workspaceRoot, openclawDir, setBrowseDir],
   );
 
   // Build the enhanced tree: real tree + Chats + Cron virtual folders at the bottom
@@ -550,7 +580,7 @@ function WorkspacePageInner() {
       const node = resolveNode(tree, pathParam);
       if (node) {
         initialPathHandled.current = true;
-        loadContent(node);
+        void loadContent(node);
       }
     } else if (chatParam) {
       // Restore the active chat session from URL
@@ -558,7 +588,7 @@ function WorkspacePageInner() {
       setActiveSessionId(chatParam);
       setActivePath(null);
       setContent({ kind: "none" });
-      chatRef.current?.loadSession(chatParam);
+      void chatRef.current?.loadSession(chatParam);
     }
 
     // Also open entry modal from URL if present
@@ -579,7 +609,7 @@ function WorkspacePageInner() {
       }
       const node = resolveNode(tree, path);
       if (node) {
-        loadContent(node);
+        void loadContent(node);
       }
     },
     [tree, loadContent],
@@ -601,7 +631,7 @@ function WorkspacePageInner() {
         return null;
       }
       const node = findObjectNode(tree);
-      if (node) {loadContent(node);}
+      if (node) {void loadContent(node);}
     },
     [tree, loadContent],
   );

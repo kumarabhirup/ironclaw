@@ -283,26 +283,14 @@ export function WorkspaceSidebar({
 				className="px-3 py-2.5 border-t flex items-center justify-between"
 				style={{ borderColor: "var(--color-border)" }}
 			>
-				{isBrowsing && onGoHome ? (
-					<button
-						type="button"
-						onClick={onGoHome}
-						className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm"
-						style={{ color: "var(--color-text-muted)" }}
-					>
-						<WorkspaceLogo />
-						Workspace
-					</button>
-				) : (
-					<a
-						href="/"
-						className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm"
-						style={{ color: "var(--color-text-muted)" }}
-					>
-						<HomeIcon />
-						Home
-					</a>
-				)}
+				<a
+					href="/"
+					className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm"
+					style={{ color: "var(--color-text-muted)" }}
+				>
+					<HomeIcon />
+					Home
+				</a>
 				<ThemeToggle />
 			</div>
 		</aside>
