@@ -175,12 +175,12 @@ function DiffFileCard({ file }: { file: DiffFile }) {
           {path}
         </span>
         {file.additions > 0 && (
-          <span className="text-xs font-mono font-medium" style={{ color: "#22c55e" }}>
+          <span className="text-xs font-mono font-medium" style={{ color: "var(--diff-add-badge)" }}>
             +{file.additions}
           </span>
         )}
         {file.deletions > 0 && (
-          <span className="text-xs font-mono font-medium" style={{ color: "#ef4444" }}>
+          <span className="text-xs font-mono font-medium" style={{ color: "var(--diff-del-badge)" }}>
             -{file.deletions}
           </span>
         )}
@@ -215,15 +215,15 @@ function DiffFileCard({ file }: { file: DiffFile }) {
 
                   const bgColor =
                     line.type === "addition"
-                      ? "rgba(34,197,94,0.10)"
+                      ? "var(--diff-add-bg)"
                       : line.type === "deletion"
-                        ? "rgba(239,68,68,0.10)"
+                        ? "var(--diff-del-bg)"
                         : "transparent";
                   const textColor =
                     line.type === "addition"
-                      ? "#4ade80"
+                      ? "var(--diff-add-text)"
                       : line.type === "deletion"
-                        ? "#f87171"
+                        ? "var(--diff-del-text)"
                         : "var(--color-text)";
                   const prefix =
                     line.type === "addition"

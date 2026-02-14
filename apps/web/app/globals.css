@@ -50,6 +50,14 @@
   --color-chip-report: rgba(22, 163, 74, 0.08);
   --color-chip-report-text: #16a34a;
 
+  /* Diff viewer */
+  --diff-add-bg: rgba(22, 163, 74, 0.09);
+  --diff-add-text: #166534;
+  --diff-add-badge: #16a34a;
+  --diff-del-bg: rgba(220, 38, 38, 0.07);
+  --diff-del-text: #991b1b;
+  --diff-del-badge: #dc2626;
+
   /* Shadow */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
@@ -102,6 +110,14 @@
   --color-chip-database-text: #c084fc;
   --color-chip-report: rgba(34, 197, 94, 0.12);
   --color-chip-report-text: #4ade80;
+
+  /* Diff viewer */
+  --diff-add-bg: rgba(34, 197, 94, 0.10);
+  --diff-add-text: #4ade80;
+  --diff-add-badge: #22c55e;
+  --diff-del-bg: rgba(239, 68, 68, 0.10);
+  --diff-del-text: #f87171;
+  --diff-del-badge: #ef4444;
 
   /* Shadow */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.20);
