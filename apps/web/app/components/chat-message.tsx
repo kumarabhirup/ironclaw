@@ -424,20 +424,27 @@ function AttachedFilesCard({ paths }: { paths: string[] }) {
 
 /**
  * Detect whether an inline code string looks like a local file/directory path.
- * Matches patterns like:
- *   ~/Downloads/file.pdf
- *   /Users/name/Documents/file.txt
- *   /home/user/file.py
- *   ./relative/path
- *   ../parent/path
- *   /etc/config
+ * Matches anything starting with:
+ *   ~/   (home-relative)
+ *   /    (absolute)
+ *   ./   (current-dir-relative)
+ *   ../  (parent-dir-relative)
+ * Must contain at least one `/` separator to distinguish from plain commands.
  */
-const FILE_PATH_RE =
-	/^(?:~\/|\.\.?\/|\/(?:Users|home|tmp|var|etc|opt|usr|Library|Applications|Downloads|Documents|Desktop)\b)[^\s]*$/;
-
 function looksLikeFilePath(text: string): boolean {
-	if (!text || text.length < 2 || text.length > 500) {return false;}
-	return FILE_PATH_RE.test(text.trim());
+	const t = text.trim();
+	if (!t || t.length < 3 || t.length > 500) {return false;}
+	// Must start with a path prefix
+	if (!(t.startsWith("~/") || t.startsWith("/") || t.startsWith("./") || t.startsWith("../"))) {
+		return false;
+	}
+	// Must have at least one path separator beyond the prefix
+	// (avoids matching bare `/` or standalone commands like `/bin`)
+	const afterPrefix = t.startsWith("~/") ? t.slice(2) :
+		t.startsWith("../") ? t.slice(3) :
+		t.startsWith("./") ? t.slice(2) :
+		t.slice(1);
+	return afterPrefix.includes("/") || afterPrefix.includes(".");
 }
 
 /** Open a file path using the system default application. */
@@ -496,14 +503,10 @@ function FilePathCode({
 
 	return (
 		<code
-			className="file-path-code"
+			className={`inline-flex items-center gap-[0.2em] px-[0.3em] py-0 whitespace-nowrap max-w-full overflow-hidden text-ellipsis no-underline transition-colors duration-150 rounded-md text-[color:var(--color-accent)] border border-[color:var(--color-border)] bg-white/20 hover:bg-white/40 active:bg-white ${status === "opening" ? "cursor-wait opacity-70" : "cursor-pointer"}`}
 			onClick={handleClick}
 			onContextMenu={handleContextMenu}
-			title={status === "error" ? "File not found" : `Click to open · Right-click to reveal in Finder`}
-			style={{
-				cursor: status === "opening" ? "wait" : "pointer",
-				opacity: status === "opening" ? 0.7 : 1,
-			}}
+			title={status === "error" ? "File not found" : "Click to open · Right-click to reveal in Finder"}
 		>
 			<svg
 				width="12"
@@ -514,7 +517,7 @@ function FilePathCode({
 				strokeWidth="2"
 				strokeLinecap="round"
 				strokeLinejoin="round"
-				className="file-path-icon"
+				className="shrink-0 opacity-60"
 			>
 				{status === "error" ? (
 					<>
@@ -650,7 +653,7 @@ export const ChatMessage = memo(function ChatMessage({ message, isStreaming }: {
 		return (
 			<div className="flex justify-end py-2">
 				<div
-					className="font-bookerly max-w-[80%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm leading-6"
+					className="font-bookerly max-w-[80%] rounded-2xl rounded-br-sm px-3 py-2 text-sm leading-6"
 					style={{
 						background: "var(--color-user-bubble)",
 						color: "var(--color-user-bubble-text)",

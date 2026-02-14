@@ -782,18 +782,10 @@ function ReasoningBlock({
 	return (
 		<div className="mb-2">
 			<div
-				className="text-[13px] whitespace-pre-wrap leading-relaxed"
-				style={{ color: "var(--color-text-secondary)" }}
+			className="text-[13px] whitespace-pre-wrap leading-relaxed"
+			style={{ color: "var(--color-text-muted)" }}
 			>
 				{text}
-				{isStreaming && (
-					<span
-						className="inline-block w-1 h-3.5 ml-0.5 animate-pulse align-text-bottom rounded-sm"
-						style={{
-							background: "var(--color-accent)",
-						}}
-					/>
-				)}
 			</div>
 		</div>
 	);
