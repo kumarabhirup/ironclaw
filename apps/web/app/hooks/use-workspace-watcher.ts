@@ -31,13 +31,17 @@ export function useWorkspaceWatcher() {
 
   const mountedRef = useRef(true);
   const retryDelayRef = useRef(1000);
+  // Version counter: prevents stale fetch responses from overwriting newer data.
+  // Each fetch increments the counter; only the latest version's response is applied.
+  const fetchVersionRef = useRef(0);
 
   // Fetch the workspace tree from the tree API
   const fetchWorkspaceTree = useCallback(async () => {
+    const version = ++fetchVersionRef.current;
     try {
       const res = await fetch("/api/workspace/tree");
       const data = await res.json();
-      if (mountedRef.current) {
+      if (mountedRef.current && fetchVersionRef.current === version) {
         setTree(data.tree ?? []);
         setExists(data.exists ?? false);
         setWorkspaceRoot(data.workspaceRoot ?? null);
@@ -45,36 +49,45 @@ export function useWorkspaceWatcher() {
         setLoading(false);
       }
     } catch {
-      if (mountedRef.current) {setLoading(false);}
+      if (mountedRef.current && fetchVersionRef.current === version) {setLoading(false);}
     }
   }, []);
 
   // Fetch a directory listing from the browse API
   const fetchBrowseTree = useCallback(async (dir: string) => {
+    const version = ++fetchVersionRef.current;
     try {
       setLoading(true);
       const res = await fetch(`/api/workspace/browse?dir=${encodeURIComponent(dir)}`);
       const data = await res.json();
-      if (mountedRef.current) {
+      if (mountedRef.current && fetchVersionRef.current === version) {
         setTree(data.entries ?? []);
         setParentDir(data.parentDir ?? null);
         setExists(true);
         setLoading(false);
       }
     } catch {
-      if (mountedRef.current) {setLoading(false);}
+      if (mountedRef.current && fetchVersionRef.current === version) {setLoading(false);}
     }
   }, []);
 
   // Smart setBrowseDir: auto-return to workspace mode when navigating to the
   // workspace root, so all virtual folders (Chats, Cron, etc.) and DuckDB
   // object detection are restored.
+  const browseDirRef = useRef<string | null>(null);
   const setBrowseDir = useCallback((dir: string | null) => {
+    let nextDir = dir;
     if (dir != null && workspaceRoot && dir === workspaceRoot) {
-      setBrowseDirRaw(null);
-    } else {
-      setBrowseDirRaw(dir);
+      nextDir = null;
     }
+    // Mark loading synchronously when entering a new browse directory so the
+    // very first render after navigation already shows the loading state
+    // (prevents a flash of stale tree data).
+    if (nextDir != null && nextDir !== browseDirRef.current) {
+      setLoading(true);
+    }
+    browseDirRef.current = nextDir;
+    setBrowseDirRaw(nextDir);
   }, [workspaceRoot]);
 
   // Expose the raw value for reads

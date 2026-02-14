@@ -251,8 +251,8 @@ function WorkspacePageInner() {
     if (!activePath) {return undefined;}
     if (isVirtualPath(activePath)) {return undefined;}
     const filename = activePath.split("/").pop() || activePath;
-    return { path: activePath, filename };
-  }, [activePath]);
+    return { path: activePath, filename, isDirectory: content.kind === "directory" };
+  }, [activePath, content.kind]);
 
   // Update content state when the agent edits the file (live reload)
   const handleFileChanged = useCallback((newContent: string) => {
@@ -413,9 +413,13 @@ function WorkspacePageInner() {
           }
         }
         // Clicking a folder in browse mode → navigate into it so the tree
-        // is fetched fresh (avoids stale/empty children from depth limits).
+        // is fetched fresh, AND show it in the main panel with the chat sidebar.
+        // Children come from the live tree (same data source as the sidebar),
+        // not from the stale node snapshot.
         if (node.type === "folder") {
           setBrowseDir(node.path);
+          setActivePath(node.path);
+          setContent({ kind: "directory", node: { name: node.name, path: node.path, type: "folder" } });
           return;
         }
       }
@@ -541,8 +545,11 @@ function WorkspacePageInner() {
   const handleFileSearchSelect = useCallback(
     (item: { name: string; path: string; type: string }) => {
       if (item.type === "folder") {
-        // Navigate the sidebar into the folder
+        // Navigate the sidebar into the folder and show it in the main panel.
+        // Children come from the live tree (same data source as the sidebar).
         setBrowseDir(item.path);
+        setActivePath(item.path);
+        setContent({ kind: "directory", node: { name: item.name, path: item.path, type: "folder" } });
       } else {
         // Navigate the sidebar to the parent directory of the file
         const parentOfFile = item.path.split("/").slice(0, -1).join("/") || "/";
@@ -801,8 +808,8 @@ function WorkspacePageInner() {
                   <path d="m12 19-7-7 7-7" /><path d="M19 12H5" />
                 </svg>
               </button>
-              {/* Chat sidebar toggle (hidden for reserved/virtual paths and directories) */}
-              {fileContext && content.kind !== "directory" && (
+              {/* Chat sidebar toggle (hidden for reserved/virtual paths) */}
+              {fileContext && (
                 <button
                   type="button"
                   onClick={() => setShowChatSidebar((v) => !v)}
@@ -811,7 +818,7 @@ function WorkspacePageInner() {
                     color: showChatSidebar ? "var(--color-accent)" : "var(--color-text-muted)",
                     background: showChatSidebar ? "var(--color-accent-light)" : "transparent",
                   }}
-                  title={showChatSidebar ? "Hide chat" : "Chat about this file"}
+                  title={showChatSidebar ? "Hide chat" : fileContext.isDirectory ? "Chat about this folder" : "Chat about this file"}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -844,6 +851,8 @@ function WorkspacePageInner() {
                   workspaceExists={workspaceExists}
                   tree={tree}
                   activePath={activePath}
+                  browseDir={browseDir}
+                  treeLoading={treeLoading}
                   members={context?.members}
                   onNodeSelect={handleNodeSelect}
                   onNavigateToObject={handleNavigateToObject}
@@ -857,8 +866,8 @@ function WorkspacePageInner() {
                 />
               </div>
 
-              {/* Chat sidebar (file-scoped) — hidden for directories and reserved paths */}
-              {fileContext && showChatSidebar && content.kind !== "directory" && (
+              {/* Chat sidebar (file/folder-scoped) — hidden for reserved paths */}
+              {fileContext && showChatSidebar && (
                 <aside
                   className="flex-shrink-0 border-l"
                   style={{
@@ -905,6 +914,8 @@ function ContentRenderer({
   workspaceExists,
   tree,
   activePath,
+  browseDir,
+  treeLoading,
   members,
   onNodeSelect,
   onNavigateToObject,
@@ -920,6 +931,10 @@ function ContentRenderer({
   workspaceExists: boolean;
   tree: TreeNode[];
   activePath: string | null;
+  /** Current browse directory (absolute path), or null in workspace mode. */
+  browseDir?: string | null;
+  /** Whether the tree is currently being fetched. */
+  treeLoading?: boolean;
   members?: Array<{ id: string; name: string; email: string; role: string }>;
   onNodeSelect: (node: TreeNode) => void;
   onNavigateToObject: (objectName: string) => void;
@@ -1011,13 +1026,34 @@ function ContentRenderer({
         />
       );
 
-    case "directory":
+    case "directory": {
+      // In browse mode the top-level tree is the live listing of browseDir
+      // (same data source as the sidebar). Use it directly instead of the
+      // possibly-stale node.children stored in content state.
+      const isBrowseLive = browseDir != null && activePath === browseDir;
+      if (isBrowseLive && treeLoading) {
+        return (
+          <div className="flex items-center justify-center h-full">
+            <div
+              className="w-6 h-6 border-2 rounded-full animate-spin"
+              style={{
+                borderColor: "var(--color-border)",
+                borderTopColor: "var(--color-accent)",
+              }}
+            />
+          </div>
+        );
+      }
+      const directoryNode = isBrowseLive
+        ? { ...content.node, children: tree }
+        : content.node;
       return (
         <DirectoryListing
-          node={content.node}
+          node={directoryNode}
           onNodeSelect={onNodeSelect}
         />
       );
+    }
 
     case "cron-dashboard":
       return (

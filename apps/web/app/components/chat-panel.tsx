@@ -426,6 +426,8 @@ export type ChatPanelHandle = {
 export type FileContext = {
 	path: string;
 	filename: string;
+	/** When true the path refers to a directory rather than a file. */
+	isDirectory?: boolean;
 };
 
 type FileScopedSession = {
@@ -897,7 +899,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 				}
 
 				if (fileContext && isFirstFileMessageRef.current) {
-					messageText = `[Context: workspace file '${fileContext.path}']\n\n${messageText}`;
+					const label = fileContext.isDirectory ? "directory" : "file";
+					messageText = `[Context: workspace ${label} '${fileContext.path}']\n\n${messageText}`;
 					isFirstFileMessageRef.current = false;
 				}
 
@@ -1387,10 +1390,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(
 								onChange={(isEmpty) =>
 									setEditorEmpty(isEmpty)
 								}
-								placeholder={
-									compact && fileContext
-										? `Ask about ${fileContext.filename}...`
-										: attachedFiles.length >
+							placeholder={
+								compact && fileContext
+									? `Ask about ${fileContext.isDirectory ? "this folder" : fileContext.filename}...`
+									: attachedFiles.length >
 												0
 											? "Add a message or send files..."
 											: "Type @ to mention files..."
